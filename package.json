@@ -1,0 +1,158 @@
+{
+  "name": "company-code-ai",
+  "displayName": "Company Code AI",
+  "description": "VS Code codebase assistant for an internal Chat Completions-compatible LLM server.",
+  "version": "0.1.0",
+  "publisher": "company",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:companyCodeAI.chatView",
+    "onCommand:companyCodeAI.openChat",
+    "onCommand:companyCodeAI.configureServer",
+    "onCommand:companyCodeAI.setAuthToken",
+    "onCommand:companyCodeAI.clearAuthToken",
+    "onCommand:companyCodeAI.addSelectionToChat",
+    "onCommand:companyCodeAI.addCurrentFileToChat"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "companyCodeAI",
+          "title": "Code AI",
+          "icon": "resources/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "companyCodeAI": [
+        {
+          "id": "companyCodeAI.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "companyCodeAI.openChat",
+        "title": "Company Code AI: Open Chat"
+      },
+      {
+        "command": "companyCodeAI.configureServer",
+        "title": "Company Code AI: Configure Server"
+      },
+      {
+        "command": "companyCodeAI.setAuthToken",
+        "title": "Company Code AI: Set Auth Token"
+      },
+      {
+        "command": "companyCodeAI.clearAuthToken",
+        "title": "Company Code AI: Clear Auth Token"
+      },
+      {
+        "command": "companyCodeAI.addSelectionToChat",
+        "title": "Company Code AI: Add Selection to Chat"
+      },
+      {
+        "command": "companyCodeAI.addCurrentFileToChat",
+        "title": "Company Code AI: Add Current File to Chat"
+      }
+    ],
+    "configuration": {
+      "title": "Company Code AI",
+      "properties": {
+        "companyCodeAI.serverUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Internal LLM server base URL. Accepted forms include `https://llm-gateway.internal/v1` or a full `/chat/completions` endpoint."
+        },
+        "companyCodeAI.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model identifier accepted by the internal server."
+        },
+        "companyCodeAI.maxContextTokens": {
+          "type": "number",
+          "default": 160000,
+          "minimum": 8000,
+          "maximum": 200000,
+          "markdownDescription": "Target maximum context tokens sent to the server. The extension also enforces a 200k hard cap."
+        },
+        "companyCodeAI.allowedServerHosts": {
+          "type": "array",
+          "default": [
+            "localhost",
+            "127.0.0.1/32",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            ".internal",
+            ".corp",
+            ".local",
+            ".lan"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Allowed internal hostnames, suffixes, or IPv4 CIDR ranges for the LLM server."
+        },
+        "companyCodeAI.toolCallMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "native",
+            "json",
+            "disabled"
+          ],
+          "markdownDescription": "How the agent exposes safe workspace tools to the model."
+        },
+        "companyCodeAI.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 10000,
+          "maximum": 600000,
+          "markdownDescription": "Timeout for one model request."
+        },
+        "companyCodeAI.enableCommandRunner": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Reserved for a future reviewed command runner. The v1 extension does not execute arbitrary shell commands."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "companyCodeAI.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        },
+        {
+          "command": "companyCodeAI.addCurrentFileToChat",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
+    "vscode:prepublish": "npm run check:endpoints && npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.93.0",
+    "typescript": "^5.6.3"
+  }
+}

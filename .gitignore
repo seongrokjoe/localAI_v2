@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.company-code-ai/
+.vscode-test/
+*.vsix
+*.log

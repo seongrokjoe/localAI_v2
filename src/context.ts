@@ -1,0 +1,80 @@
+import * as crypto from "node:crypto";
+import * as vscode from "vscode";
+import { ContextItem } from "./types";
+
+export class ContextManager {
+  private readonly items = new Map<string, ContextItem>();
+  private readonly changedEmitter = new vscode.EventEmitter<ContextItem[]>();
+  readonly onDidChange = this.changedEmitter.event;
+
+  addSelection(document: vscode.TextDocument, range: vscode.Range, text: string): ContextItem {
+    const label = `${vscode.workspace.asRelativePath(document.uri, false)}:${range.start.line + 1}`;
+    return this.add({
+      type: "selection",
+      label,
+      content: text,
+      uri: document.uri.toString(),
+      languageId: document.languageId,
+    });
+  }
+
+  addFile(document: vscode.TextDocument): ContextItem {
+    return this.add({
+      type: "file",
+      label: vscode.workspace.asRelativePath(document.uri, false),
+      content: document.getText(),
+      uri: document.uri.toString(),
+      languageId: document.languageId,
+    });
+  }
+
+  addNote(label: string, content: string): ContextItem {
+    return this.add({
+      type: "note",
+      label,
+      content,
+    });
+  }
+
+  list(): ContextItem[] {
+    return Array.from(this.items.values()).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  clear(): void {
+    this.items.clear();
+    this.changedEmitter.fire(this.list());
+  }
+
+  remove(id: string): void {
+    this.items.delete(id);
+    this.changedEmitter.fire(this.list());
+  }
+
+  dispose(): void {
+    this.changedEmitter.dispose();
+  }
+
+  private add(input: Omit<ContextItem, "id" | "createdAt">): ContextItem {
+    const id = crypto.randomUUID();
+    const item: ContextItem = {
+      id,
+      createdAt: Date.now(),
+      ...input,
+    };
+    this.items.set(id, item);
+    this.changedEmitter.fire(this.list());
+    return item;
+  }
+}
+
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+export function truncateToTokens(text: string, maxTokens: number): string {
+  const maxChars = Math.max(0, maxTokens * 4);
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}\n[truncated]`;
+}

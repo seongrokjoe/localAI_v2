@@ -1,0 +1,10 @@
+.vscode/**
+.company-code-ai/**
+node_modules/**
+src/**
+scripts/**
+*.map
+tsconfig.json
+package-lock.json
+pnpm-lock.yaml
+README.md
