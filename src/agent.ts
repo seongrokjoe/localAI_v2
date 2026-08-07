@@ -8,27 +8,15 @@ import {
   RuntimeConfig,
   ChatToolCall,
   PatchApplyOutcome,
+  PatchPreparationOutcome,
+  PreparedAssistantPatch,
+  WorkspacePatchChange,
 } from "./types";
 import { estimateTokens, truncateToTokens } from "./context";
 import { LlmClient } from "./llmClient";
 import { readSummaryForContext } from "./projectInit";
 import { formatPatchApplyOutcome, WorkspaceTools } from "./tools";
-
-interface PatchProposalChange {
-  path?: string;
-  fullContent?: string;
-  originalText?: string;
-  replacementText?: string;
-  createIfMissing?: boolean;
-  description?: string;
-}
-
-interface PatchProposal {
-  message?: string;
-  changes?: PatchProposalChange[];
-}
-
-type PatchApprovalMode = "vscodePrompt" | "preapproved";
+import { parsePatchResponse, parseTargetResponse } from "./patchProtocol";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -49,10 +37,10 @@ const modePrompts: Record<AgentMode, string> = {
   ].join("\n"),
   implement: [
     "현재 모드는 ImplementMode입니다.",
-    "정확한 파일 수정은 applyPatchAfterUserApproval 도구를 통해서만 제안하세요.",
+    "승인된 계획 또는 사용자 요청에 맞는 구체적인 변경 내용을 작성하세요.",
     "승인된 계획 또는 사용자의 직접 요청 범위 안에서만 좁게 수정하세요.",
     "채팅 텍스트로 '패치를 적용하시겠습니까?', '예/아니오' 같은 승인 질문을 출력하지 마세요.",
-    "도구 호출을 사용할 수 없으면 파일을 수정한 척하지 말고 정확한 교체 코드 조각을 제공하세요. 실제 적용 여부는 확장 UI가 묻습니다.",
+    "파일을 수정했다고 단정하지 말고 대상 파일 경로와 변경할 코드의 의도를 명확히 설명하세요. 확장이 별도로 검증된 패치를 만들고 승인을 요청합니다.",
   ].join("\n"),
 };
 
@@ -100,7 +88,7 @@ export class CodeAgent {
     for (let step = 0; step < 4; step++) {
       const result = await client.complete({
         messages,
-        tools: useNativeTools ? this.tools.definitionsForMode(options.mode) : undefined,
+        tools: useNativeTools ? this.tools.definitionsForMode(options.mode, false) : undefined,
         signal,
         onDelta: (text) => {
           accumulated += text;
@@ -120,7 +108,10 @@ export class CodeAgent {
       });
 
       for (const toolCall of toolCalls) {
-        const toolResult = await this.executeToolCall(toolCall, options.mode);
+        const toolResult =
+          toolCall.function.name === "applyPatchAfterUserApproval"
+            ? "파일 변경은 검증된 패치를 만든 뒤 확장 승인 UI에서 처리합니다. 지금은 변경 내용을 설명하세요."
+            : await this.executeToolCall(toolCall, options.mode);
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id || toolCall.function.name,
@@ -132,41 +123,62 @@ export class CodeAgent {
     return accumulated;
   }
 
-  async applyAssistantChangeProposal(
+  async prepareAssistantChangeProposal(
     originalPrompt: string,
     assistantResponse: string,
     contextItems: ContextItem[],
     config: RuntimeConfig,
-    options: AgentRunOptions,
-    onDelta: (text: string) => void,
     onStatus?: (text: string) => void | Promise<void>,
     signal?: AbortSignal,
-    approvalMode: PatchApprovalMode = "vscodePrompt",
-  ): Promise<AssistantPatchApplyResult> {
+  ): Promise<PatchPreparationOutcome> {
     this.lastRunAppliedWorkspaceChange = false;
-    await onStatus?.("변경안 분석 중");
-    const contextPack = await this.buildContextPack(originalPrompt, contextItems, config.maxContextTokens, options);
-    const proposal = await this.createPatchProposal(originalPrompt, assistantResponse, contextPack, config, signal);
-    const changes = proposal.changes ?? [];
-    if (changes.length === 0) {
-      const reason = proposal.message?.trim() || "적용할 수 있는 안전한 변경안을 찾지 못했습니다. 파일 경로와 기존 원문이 포함되도록 다시 요청하세요.";
-      return this.finishAssistantPatch(notAppliedOutcome(reason), onDelta);
-    }
-    const unsafeFullContentPaths = await this.existingFullContentPaths(changes);
-    if (unsafeFullContentPaths.length > 0) {
-      const reason = [
-        "기존 파일 전체 덮어쓰기는 인코딩이나 들여쓰기 스타일을 깨뜨릴 수 있어 적용하지 않았습니다.",
-        `대상 파일: ${unsafeFullContentPaths.join(", ")}`,
-        "해당 파일을 열거나 File로 추가한 뒤, 기존 원문 일부를 기준으로 다시 수정 요청하세요.",
-      ].join("\n");
-      return this.finishAssistantPatch(notAppliedOutcome(reason), onDelta);
+    await onStatus?.("대상 파일 확인 중");
+    const workspaceFiles = await this.safeListFiles(10000);
+    const targetPaths = await this.discoverTargetPaths(originalPrompt, assistantResponse, contextItems, workspaceFiles, config, signal);
+    if (targetPaths.length === 0) {
+      return {
+        status: "failed",
+        message: "수정 대상 파일을 확정하지 못했습니다. LLM 설명에 실제 파일 경로가 없고 File 컨텍스트에서도 대상을 찾지 못했습니다.",
+      };
     }
 
-    await onStatus?.(approvalMode === "preapproved" ? "파일 변경 적용 중" : "파일 변경 승인 대기 중");
-    const outcome =
-      approvalMode === "preapproved"
-        ? await this.tools.applyPatchWithPriorApproval({ changes }, "implement")
-        : await this.tools.applyPatchAfterUserApproval({ changes }, "implement");
+    const allChanges: WorkspacePatchChange[] = [];
+    const messages: string[] = [];
+    for (let index = 0; index < targetPaths.length; index++) {
+      const targetPath = targetPaths[index];
+      await onStatus?.(`검증 패치 생성 중 (${index + 1}/${targetPaths.length}): ${targetPath}`);
+      const generated = await this.createValidatedFileChanges(targetPath, originalPrompt, assistantResponse, config, signal, onStatus);
+      if (!generated.changes) {
+        return { status: "failed", message: generated.message };
+      }
+      allChanges.push(...generated.changes);
+      if (generated.message) {
+        messages.push(generated.message);
+      }
+    }
+
+    const combinedValidation = await this.tools.validatePatch(allChanges);
+    if (!combinedValidation.valid) {
+      return { status: "failed", message: `파일별 패치는 생성됐지만 통합 검증에 실패했습니다: ${combinedValidation.message}` };
+    }
+
+    const patch: PreparedAssistantPatch = {
+      message: messages.filter(Boolean).join("; ") || `${targetPaths.length}개 파일의 변경안을 검증했습니다.`,
+      targetPaths,
+      changes: allChanges,
+    };
+    this.output.appendLine(`[패치 준비] 검증 완료: ${targetPaths.join(", ")} / 변경 ${allChanges.length}개`);
+    return { status: "ready", message: patch.message, patch };
+  }
+
+  async applyPreparedChangeProposal(
+    patch: PreparedAssistantPatch,
+    onDelta: (text: string) => void,
+    onStatus?: (text: string) => void | Promise<void>,
+  ): Promise<AssistantPatchApplyResult> {
+    this.lastRunAppliedWorkspaceChange = false;
+    await onStatus?.("검증된 패치 적용 중");
+    const outcome = await this.tools.applyPatchWithPriorApproval({ changes: patch.changes }, "implement");
     return this.finishAssistantPatch(outcome, onDelta);
   }
 
@@ -191,68 +203,152 @@ export class CodeAgent {
     return { response, outcome };
   }
 
-  private async createPatchProposal(
+  private async discoverTargetPaths(
     originalPrompt: string,
     assistantResponse: string,
-    contextPack: string,
+    contextItems: ContextItem[],
+    workspaceFiles: string[],
     config: RuntimeConfig,
     signal?: AbortSignal,
-  ): Promise<PatchProposal> {
+  ): Promise<string[]> {
+    const explicitPaths = [...new Set([...explicitContextPaths(contextItems), ...visibleEditorPaths()])];
+    const mentionedPaths = mentionedWorkspacePaths(assistantResponse, workspaceFiles);
+    const requestText = `${originalPrompt}\n${assistantResponse}`;
+    const knownFiles = [...new Set([...workspaceFiles, ...explicitPaths])];
+    const deterministic = normalizeTargetPaths([...mentionedPaths, ...explicitPaths], knownFiles, requestText);
+    if (deterministic.length === 1) {
+      this.output.appendLine(`[패치 준비] 대상 파일을 로컬 정보로 확정: ${deterministic[0]}`);
+      return deterministic;
+    }
     const messages: ChatMessage[] = [
       {
         role: "system",
         content: [
-          "당신은 Company Code AI의 변경안 적용 변환기입니다.",
-          "assistantResponse에 포함된 코드 변경 설명을 applyPatchAfterUserApproval 도구 인자 JSON으로만 변환하세요.",
-          "반드시 JSON 객체만 반환하세요. markdown fence, 설명 문장, 주석을 JSON 밖에 쓰지 마세요.",
-          "JSON 형식은 { \"message\": string, \"changes\": array } 입니다.",
-          "기존 파일 변경은 반드시 originalText/replacementText만 사용하세요. 기존 파일에 fullContent를 사용하지 마세요.",
-          "새 파일 생성에만 fullContent와 createIfMissing: true를 사용하세요.",
-          "originalText는 워크스페이스 컨텍스트에 있는 원문을 정확히 복사해야 합니다.",
-          "기존 파일의 인코딩, 줄바꿈, 들여쓰기 스타일을 깨지 않도록 최소 범위만 변경하세요.",
-          "안전한 패치를 만들 수 없으면 changes를 빈 배열로 두고 message에 이유를 한국어로 적으세요.",
+          "당신은 코드 변경 설명에서 실제 수정 대상 파일 경로만 식별하는 변환기입니다.",
+          "반드시 { \"message\": string, \"targetPaths\": string[] } JSON 객체만 반환하세요.",
+          "targetPaths에는 실제로 수정하거나 생성해야 하는 파일만 넣고 참고 파일은 제외하세요.",
+          "기존 파일은 제공된 워크스페이스 파일 경로를 한 글자도 바꾸지 말고 사용하세요.",
         ].join("\n"),
       },
       {
         role: "user",
         content: [
-          "워크스페이스 컨텍스트:",
-          contextPack,
+          "워크스페이스 파일 목록:",
+          truncateToTokens(workspaceFiles.join("\n"), 20000),
+          "File/Selection 컨텍스트 및 열린 편집기 경로 후보:",
+          explicitPaths.join("\n") || "없음",
+          "변경 설명에서 직접 감지한 경로 후보:",
+          mentionedPaths.join("\n") || "없음",
           "사용자의 원래 요청:",
           truncateToTokens(originalPrompt, 12000),
           "모델이 채팅 화면에 출력한 변경안:",
-          truncateToTokens(assistantResponse, 50000),
+          truncateToTokens(assistantResponse, 40000),
         ].join("\n\n"),
       },
     ];
 
-    const client = new LlmClient(config);
-    let content = "";
-    const result = await client.complete({
-      messages,
-      signal,
-      onDelta: (delta) => {
-        content += delta;
-      },
-    });
-    return parsePatchProposal(result.content || content);
+    let feedback = "";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const attemptMessages = feedback
+        ? messages.map((message, index) =>
+            index === 1 ? { ...message, content: `${message.content}\n\n이전 응답 오류:\n${feedback}` } : message,
+          )
+        : messages;
+      const raw = await completeHiddenJson(attemptMessages, config, signal);
+      const parsed = parseTargetResponse(raw);
+      const discovered = normalizeTargetPaths(parsed.targetPaths, knownFiles, requestText);
+      if (discovered.length > 0) {
+        return discovered.slice(0, 12);
+      }
+      feedback = parsed.issues.join(" | ") || "반환된 대상 경로가 워크스페이스 파일과 일치하지 않습니다.";
+      this.output.appendLine(`[패치 준비] 대상 파일 응답 문제 (${attempt}/2): ${feedback}`);
+    }
+
+    return deterministic.slice(0, 12);
   }
 
-  private async existingFullContentPaths(changes: PatchProposalChange[]): Promise<string[]> {
-    const paths: string[] = [];
-    for (const change of changes) {
-      if (typeof change.fullContent !== "string" || !change.path) {
-        continue;
+  private async createValidatedFileChanges(
+    targetPath: string,
+    originalPrompt: string,
+    assistantResponse: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+    onStatus?: (text: string) => void | Promise<void>,
+  ): Promise<{ changes?: WorkspacePatchChange[]; message: string }> {
+    const exists = await this.tools.fileExists(targetPath);
+    const current = exists ? await this.tools.readFileExact(targetPath) : "";
+    const fileContext = exists ? buildPatchFileContext(current, `${originalPrompt}\n${assistantResponse}`, 480000) : "[새 파일]";
+    let feedback = "";
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await onStatus?.(`패치 검증 중: ${targetPath} (${attempt}/3)`);
+      const messages: ChatMessage[] = [
+        {
+          role: "system",
+          content: [
+            "당신은 단일 파일에 적용할 정확한 텍스트 패치를 생성하는 변환기입니다.",
+            "반드시 { \"message\": string, \"changes\": array } JSON 객체만 반환하세요.",
+            `모든 changes.path는 반드시 정확히 '${targetPath}'이어야 합니다.`,
+            exists
+              ? "기존 파일에는 originalText와 replacementText만 사용하세요. originalText는 제공된 현재 파일 원문에서 공백과 줄바꿈까지 정확히 복사하세요."
+              : "새 파일에는 fullContent와 createIfMissing: true를 사용하세요.",
+            "설명만 반환하지 말고 실제 변경이 필요하면 changes를 비우지 마세요.",
+            "서로 떨어진 여러 부분을 수정할 때는 changes에 여러 항목을 넣어도 됩니다.",
+            "markdown fence나 JSON 밖의 문장은 쓰지 마세요.",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: [
+            "사용자 요청:",
+            truncateToTokens(originalPrompt, 12000),
+            "모델이 설명한 구현 내용:",
+            truncateToTokens(assistantResponse, 40000),
+            `현재 파일 경로: ${targetPath}`,
+            "현재 파일 원문 또는 정확한 원문 구간:",
+            fileContext,
+            feedback ? `이전 시도 검증 오류:\n${truncateToTokens(feedback, 8000)}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+      ];
+
+      const raw = await completeHiddenJson(messages, config, signal);
+      const parsed = parsePatchResponse(raw, targetPath);
+      const issues = [...parsed.issues];
+      const changes = parsed.changes.filter((change) => {
+        if (!sameWorkspacePath(change.path, targetPath)) {
+          issues.push(`허용되지 않은 대상 경로가 반환됐습니다: ${change.path}`);
+          return false;
+        }
+        if (exists && typeof change.fullContent === "string") {
+          issues.push("기존 파일에 fullContent가 반환됐습니다. originalText/replacementText가 필요합니다.");
+          return false;
+        }
+        if (!exists && typeof change.fullContent === "string") {
+          change.createIfMissing = true;
+        }
+        return true;
+      });
+
+      if (changes.length > 0 && issues.length === 0) {
+        const validation = await this.tools.validatePatch(changes);
+        if (validation.valid) {
+          this.output.appendLine(`[패치 준비] ${targetPath} 검증 성공 (${attempt}/3), 변경 ${changes.length}개`);
+          return { changes, message: parsed.message || `${targetPath} 변경안 검증 완료` };
+        }
+        issues.push(validation.message);
       }
-      const uri = this.tools.resolveWorkspacePath(change.path);
-      try {
-        await vscode.workspace.fs.stat(uri);
-        paths.push(change.path);
-      } catch {
-        // 새 파일 생성은 fullContent를 허용합니다.
+
+      if (changes.length === 0 && issues.length === 0) {
+        issues.push(parsed.message || "LLM이 실제 changes 항목을 반환하지 않았습니다.");
       }
+      feedback = issues.join("\n");
+      this.output.appendLine(`[패치 준비] ${targetPath} 검증 실패 (${attempt}/3): ${feedback.replace(/\s+/g, " ").slice(0, 1000)}`);
     }
-    return paths;
+
+    return { message: `${targetPath}의 적용 가능한 패치를 3회 시도 후에도 만들지 못했습니다: ${feedback}` };
   }
 
   private async buildContextPack(
@@ -301,9 +397,9 @@ export class CodeAgent {
     return sections.join("\n\n");
   }
 
-  private async safeListFiles(): Promise<string[]> {
+  private async safeListFiles(maxResults = 500): Promise<string[]> {
     try {
-      return await this.tools.listFiles("**/*", 500);
+      return await this.tools.listFiles("**/*", maxResults);
     } catch {
       return [];
     }
@@ -392,45 +488,133 @@ function tryParseJsonBlock(content: string): any {
   }
 }
 
-function parsePatchProposal(content: string): PatchProposal {
-  const parsed = tryParseJsonBlock(content);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("변경안 적용 응답이 JSON 객체가 아닙니다.");
-  }
-
-  const raw = parsed as PatchProposal;
-  const changes = Array.isArray(raw.changes) ? raw.changes.map(normalizePatchChange).filter(isPatchProposalChange) : [];
-  return {
-    message: typeof raw.message === "string" ? raw.message : undefined,
-    changes,
-  };
+async function completeHiddenJson(messages: ChatMessage[], config: RuntimeConfig, signal?: AbortSignal): Promise<string> {
+  const client = new LlmClient(config);
+  let content = "";
+  const result = await client.complete({
+    messages,
+    signal,
+    onDelta: (delta) => {
+      content += delta;
+    },
+  });
+  return result.content || content;
 }
 
-function normalizePatchChange(change: PatchProposalChange): PatchProposalChange | undefined {
-  if (!change || typeof change !== "object" || typeof change.path !== "string" || !change.path.trim()) {
-    return undefined;
-  }
-  const normalized: PatchProposalChange = {
-    path: change.path.trim(),
-    description: typeof change.description === "string" ? change.description : undefined,
-  };
-  if (typeof change.originalText === "string" && typeof change.replacementText === "string") {
-    normalized.originalText = change.originalText;
-    normalized.replacementText = change.replacementText;
-    return normalized;
-  }
-  if (typeof change.fullContent === "string") {
-    normalized.fullContent = change.fullContent;
-    normalized.createIfMissing = change.createIfMissing === true;
-    return normalized;
-  }
-  return undefined;
+function explicitContextPaths(items: ContextItem[]): string[] {
+  const includeWorkspaceFolder = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+  const paths = items
+    .filter((item) => item.type === "file" || item.type === "selection")
+    .map((item) => {
+      if (item.uri) {
+        return vscode.workspace.asRelativePath(vscode.Uri.parse(item.uri), includeWorkspaceFolder);
+      }
+      return item.type === "selection" ? item.label.replace(/:\d+$/, "") : item.label;
+    });
+  return [...new Set(paths)];
 }
 
-function isPatchProposalChange(change: PatchProposalChange | undefined): change is PatchProposalChange {
-  return Boolean(change);
+function visibleEditorPaths(): string[] {
+  const includeWorkspaceFolder = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+  return [...new Set(vscode.window.visibleTextEditors.map((editor) => vscode.workspace.asRelativePath(editor.document.uri, includeWorkspaceFolder)))];
 }
 
-function notAppliedOutcome(message: string): PatchApplyOutcome {
-  return { status: "notApplied", message, targets: [] };
+function mentionedWorkspacePaths(response: string, workspaceFiles: string[]): string[] {
+  const lower = response.toLowerCase().replace(/\\/g, "/");
+  const basenameCounts = new Map<string, number>();
+  for (const file of workspaceFiles) {
+    const basename = file.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
+    basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
+  }
+  return workspaceFiles.filter((file) => {
+    const normalized = file.replace(/\\/g, "/").toLowerCase();
+    if (lower.includes(normalized)) {
+      return true;
+    }
+    const basename = normalized.split("/").pop() ?? "";
+    return basename.length > 2 && basenameCounts.get(basename) === 1 && lower.includes(basename);
+  });
+}
+
+function normalizeTargetPaths(candidates: string[], workspaceFiles: string[], requestText: string): string[] {
+  const existing = new Map(workspaceFiles.map((file) => [normalizePath(file).toLowerCase(), file]));
+  const request = requestText.toLowerCase().replace(/\\/g, "/");
+  const normalized: string[] = [];
+  for (const candidate of candidates) {
+    const clean = normalizePath(candidate);
+    const known = existing.get(clean.toLowerCase());
+    if (known) {
+      normalized.push(known);
+      continue;
+    }
+    const basename = clean.split("/").pop() ?? "";
+    if (looksLikeRelativeFile(clean) && request.includes(basename.toLowerCase())) {
+      normalized.push(clean);
+    }
+  }
+  return [...new Map(normalized.map((value) => [value.toLowerCase(), value])).values()];
+}
+
+function normalizePath(value: string): string {
+  return value.trim().replace(/^[`'\"]+|[`'\"]+$/g, "").replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function sameWorkspacePath(left: string, right: string): boolean {
+  return normalizePath(left).toLowerCase() === normalizePath(right).toLowerCase();
+}
+
+function looksLikeRelativeFile(value: string): boolean {
+  return Boolean(value) && !value.startsWith("/") && !/^[a-z]:\//i.test(value) && !value.split("/").includes("..") && /\.[a-z0-9]{1,12}$/i.test(value);
+}
+
+function buildPatchFileContext(content: string, query: string, maxChars: number): string {
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  const lower = content.toLowerCase();
+  const terms = extractSearchTerms(query)
+    .filter((term) => term.length >= 4 && !term.includes("/"))
+    .sort((left, right) => right.length - left.length)
+    .slice(0, 40);
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const term of terms) {
+    let offset = 0;
+    for (let count = 0; count < 3; count++) {
+      const index = lower.indexOf(term.toLowerCase(), offset);
+      if (index === -1) {
+        break;
+      }
+      ranges.push({ start: Math.max(0, index - 12000), end: Math.min(content.length, index + term.length + 12000) });
+      offset = index + term.length;
+    }
+  }
+
+  if (ranges.length === 0) {
+    const half = Math.floor(maxChars / 2);
+    return [`[파일 앞부분 0-${half}]`, content.slice(0, half), `[파일 뒷부분 ${content.length - half}-${content.length}]`, content.slice(-half)].join("\n");
+  }
+
+  ranges.sort((left, right) => left.start - right.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+
+  const sections: string[] = [];
+  let used = 0;
+  for (const range of merged) {
+    if (used >= maxChars) {
+      break;
+    }
+    const excerpt = content.slice(range.start, Math.min(range.end, range.start + (maxChars - used)));
+    sections.push(`[정확한 원문 구간 ${range.start}-${range.start + excerpt.length}]\n${excerpt}`);
+    used += excerpt.length;
+  }
+  return sections.join("\n\n");
 }

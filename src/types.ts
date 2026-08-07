@@ -104,6 +104,27 @@ export interface AssistantPatchApplyResult {
   outcome: PatchApplyOutcome;
 }
 
+export interface WorkspacePatchChange {
+  path: string;
+  fullContent?: string;
+  originalText?: string;
+  replacementText?: string;
+  createIfMissing?: boolean;
+  description?: string;
+}
+
+export interface PreparedAssistantPatch {
+  message: string;
+  targetPaths: string[];
+  changes: WorkspacePatchChange[];
+}
+
+export interface PatchPreparationOutcome {
+  status: "ready" | "failed";
+  message: string;
+  patch?: PreparedAssistantPatch;
+}
+
 export interface ChangeSet {
   id: string;
   createdAt: number;

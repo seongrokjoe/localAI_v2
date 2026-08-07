@@ -3,7 +3,14 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { AgentMode, ChatToolDefinition, FileSnapshotChange, PatchApplyOutcome, PatchTargetResult } from "./types";
+import {
+  AgentMode,
+  ChatToolDefinition,
+  FileSnapshotChange,
+  PatchApplyOutcome,
+  PatchTargetResult,
+  WorkspacePatchChange,
+} from "./types";
 import { assertSafePathSegment } from "./security";
 import { decodeText, detectTextEncoding, encodeText, encodingForNewFile, TextEncodingInfo } from "./textEncoding";
 
@@ -18,17 +25,8 @@ interface TextFileState {
   encoding: TextEncodingInfo;
 }
 
-interface PatchChangeInput {
-  path?: string;
-  fullContent?: string;
-  originalText?: string;
-  replacementText?: string;
-  createIfMissing?: boolean;
-  description?: string;
-}
-
 interface PatchInput {
-  changes?: PatchChangeInput[];
+  changes?: WorkspacePatchChange[];
 }
 
 interface PreparedPatch {
@@ -74,8 +72,10 @@ export class WorkspaceTools {
     this.activeScope = scope;
   }
 
-  definitionsForMode(mode: AgentMode): ChatToolDefinition[] {
-    return mode === "plan" ? this.definitions.filter((tool) => tool.function.name !== "applyPatchAfterUserApproval") : this.definitions;
+  definitionsForMode(mode: AgentMode, allowWrite = false): ChatToolDefinition[] {
+    return mode === "plan" || !allowWrite
+      ? this.definitions.filter((tool) => tool.function.name !== "applyPatchAfterUserApproval")
+      : this.definitions;
   }
 
   private readonly definitions: ChatToolDefinition[] = [
@@ -240,6 +240,30 @@ export class WorkspaceTools {
     return `${text.slice(0, maxChars)}\n[truncated]`;
   }
 
+  async readFileExact(relativePath: string): Promise<string> {
+    const uri = this.resolveWorkspacePath(relativePath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    return document.getText();
+  }
+
+  async fileExists(relativePath: string): Promise<boolean> {
+    try {
+      await vscode.workspace.fs.stat(this.resolveWorkspacePath(relativePath));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async validatePatch(changes: WorkspacePatchChange[]): Promise<{ valid: boolean; message: string; count: number }> {
+    try {
+      const prepared = await this.preparePatch({ changes });
+      return { valid: true, message: `검증 완료: ${prepared.labels}`, count: prepared.count };
+    } catch (error) {
+      return { valid: false, message: errorMessage(error), count: 0 };
+    }
+  }
+
   async searchWorkspace(query: string, maxResults = 40): Promise<Array<{ path: string; line: number; preview: string }>> {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -356,8 +380,18 @@ export class WorkspaceTools {
     const edit = new vscode.WorkspaceEdit();
     const snapshots: FileSnapshotChange[] = [];
     const targets: PreparedPatchTarget[] = [];
+    const grouped = new Map<string, WorkspacePatchChange[]>();
     for (const change of changes) {
-      const relativePath = String(change.path ?? "");
+      const relativePath = String(change.path ?? "").trim();
+      if (!relativePath) {
+        throw new Error("변경 대상 path가 비어 있습니다.");
+      }
+      const fileChanges = grouped.get(relativePath) ?? [];
+      fileChanges.push(change);
+      grouped.set(relativePath, fileChanges);
+    }
+
+    for (const [relativePath, fileChanges] of grouped) {
       const uri = this.resolveWorkspacePath(relativePath);
       const state = await readTextFileState(uri);
       const current = state.text;
@@ -366,56 +400,63 @@ export class WorkspaceTools {
         throw new Error(`${relativePath} 파일에 저장되지 않은 변경이 있습니다. 먼저 저장한 뒤 다시 적용하세요.`);
       }
 
-      if (typeof change.fullContent === "string") {
-        if (!exists && !change.createIfMissing) {
-          throw new Error(`${relativePath} 파일이 없습니다. 새로 만들려면 createIfMissing을 true로 설정하세요.`);
+      let after = current;
+      const descriptions: string[] = [];
+      for (const change of fileChanges) {
+        if (change.description?.trim()) {
+          descriptions.push(change.description.trim());
         }
-        const after = exists ? adaptLineEndings(change.fullContent, state.eol) : change.fullContent;
-        if (exists && after === current) {
+
+        if (typeof change.fullContent === "string") {
+          if (!exists && !change.createIfMissing) {
+            throw new Error(`${relativePath} 파일이 없습니다. 새로 만들려면 createIfMissing을 true로 설정하세요.`);
+          }
+          if (fileChanges.length > 1) {
+            throw new Error(`${relativePath}의 fullContent 변경은 다른 변경과 함께 사용할 수 없습니다.`);
+          }
+          after = exists ? adaptLineEndings(change.fullContent, state.eol) : change.fullContent;
           continue;
         }
-        replaceWholeDocument(edit, uri, exists ? current : "", after);
-        snapshots.push({ path: relativePath, before: exists ? current : "", after, description: change.description });
-        targets.push({
-          path: relativePath,
-          uri,
-          before: exists ? current : "",
-          after,
-          existed: exists,
-          beforeBytes: state.bytes,
-          encoding: state.encoding,
-        });
-        continue;
-      }
 
-      if (typeof change.originalText === "string" && typeof change.replacementText === "string") {
-        if (!exists) {
-          throw new Error(`${relativePath} 파일이 없습니다.`);
-        }
-        const original = findOriginalText(current, change.originalText, state.eol);
-        if (original === undefined) {
-          throw new Error(`${relativePath}에서 originalText를 찾지 못했습니다.`);
-        }
-        const replacement = adaptLineEndings(change.replacementText, state.eol);
-        const next = current.replace(original, replacement);
-        if (next === current) {
+        if (typeof change.originalText === "string" && typeof change.replacementText === "string") {
+          if (!exists) {
+            throw new Error(`${relativePath} 파일이 없습니다.`);
+          }
+          const original = findOriginalText(after, change.originalText, state.eol);
+          if (original === undefined) {
+            throw new Error(`${relativePath}에서 originalText를 찾지 못했습니다.`);
+          }
+          const occurrences = countOccurrences(after, original);
+          if (occurrences !== 1) {
+            throw new Error(`${relativePath}에서 originalText가 ${occurrences}곳에 발견됐습니다. 한 곳만 식별되도록 더 넓은 원문이 필요합니다.`);
+          }
+          const replacement = adaptLineEndings(change.replacementText, state.eol);
+          after = after.replace(original, replacement);
           continue;
         }
-        replaceWholeDocument(edit, uri, current, next);
-        snapshots.push({ path: relativePath, before: current, after: next, description: change.description });
-        targets.push({
-          path: relativePath,
-          uri,
-          before: current,
-          after: next,
-          existed: true,
-          beforeBytes: state.bytes,
-          encoding: state.encoding,
-        });
-        continue;
+
+        throw new Error(`${relativePath}에는 fullContent 또는 originalText/replacementText가 필요합니다.`);
       }
 
-      throw new Error(`${relativePath}에는 fullContent 또는 originalText/replacementText가 필요합니다.`);
+      if (after === current) {
+        continue;
+      }
+      replaceWholeDocument(edit, uri, exists ? current : "", after);
+      snapshots.push({
+        path: relativePath,
+        before: exists ? current : "",
+        after,
+        description: descriptions.length > 0 ? descriptions.join("; ") : undefined,
+      });
+      targets.push({
+        path: relativePath,
+        uri,
+        before: exists ? current : "",
+        after,
+        existed: exists,
+        beforeBytes: state.bytes,
+        encoding: state.encoding,
+      });
     }
 
     if (targets.length === 0) {
@@ -660,11 +701,28 @@ function documentLineEnding(document: vscode.TextDocument): string {
 }
 
 function findOriginalText(current: string, originalText: string, eol: string): string | undefined {
+  if (!originalText) {
+    return undefined;
+  }
   if (current.includes(originalText)) {
     return originalText;
   }
   const eolAdjusted = adaptLineEndings(originalText, eol);
   return current.includes(eolAdjusted) ? eolAdjusted : undefined;
+}
+
+function countOccurrences(content: string, needle: string): number {
+  let count = 0;
+  let offset = 0;
+  while (offset <= content.length - needle.length) {
+    const index = content.indexOf(needle, offset);
+    if (index === -1) {
+      break;
+    }
+    count++;
+    offset = index + needle.length;
+  }
+  return count;
 }
 
 function adaptLineEndings(text: string, eol: string): string {

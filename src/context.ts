@@ -8,7 +8,7 @@ export class ContextManager {
   readonly onDidChange = this.changedEmitter.event;
 
   addSelection(document: vscode.TextDocument, range: vscode.Range, text: string): ContextItem {
-    const label = `${vscode.workspace.asRelativePath(document.uri, false)}:${range.start.line + 1}`;
+    const label = `${contextPath(document.uri)}:${range.start.line + 1}`;
     return this.add({
       type: "selection",
       label,
@@ -21,7 +21,7 @@ export class ContextManager {
   addFile(document: vscode.TextDocument): ContextItem {
     return this.add({
       type: "file",
-      label: vscode.workspace.asRelativePath(document.uri, false),
+      label: contextPath(document.uri),
       content: document.getText(),
       uri: document.uri.toString(),
       languageId: document.languageId,
@@ -65,6 +65,10 @@ export class ContextManager {
     this.changedEmitter.fire(this.list());
     return item;
   }
+}
+
+function contextPath(uri: vscode.Uri): string {
+  return vscode.workspace.asRelativePath(uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
 }
 
 export function estimateTokens(text: string): number {

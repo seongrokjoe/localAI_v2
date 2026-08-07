@@ -4,7 +4,7 @@ import { readRuntimeConfig, secretTokenKey, updateSetting } from "./config";
 import { ContextManager } from "./context";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
-import { AgentMode } from "./types";
+import { AgentMode, PreparedAssistantPatch } from "./types";
 
 interface WebviewMessage {
   type: string;
@@ -22,7 +22,7 @@ interface SendOptions {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortController?: AbortController;
-  private lastChangeProposal?: { prompt: string; response: string };
+  private lastChangeProposal?: { prompt: string; response: string; patch: PreparedAssistantPatch };
   private pendingChangeApproval = false;
 
   constructor(
@@ -191,27 +191,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.pendingChangeApproval = false;
     this.view?.webview.postMessage({ type: "clearChangeActions" });
-    this.view?.webview.postMessage({ type: "assistantStart", text: "변경안 분석 중" });
-    this.view?.webview.postMessage({ type: "status", text: "변경안 분석 중" });
+    this.view?.webview.postMessage({ type: "assistantStart", text: "검증된 패치 적용 중" });
+    this.view?.webview.postMessage({ type: "status", text: "검증된 패치 적용 중" });
 
     this.abortController = new AbortController();
     try {
-      const config = await readRuntimeConfig(this.secrets);
-      const result = await this.agent.applyAssistantChangeProposal(
-        this.lastChangeProposal.prompt,
-        this.lastChangeProposal.response,
-        this.contextManager.list(),
-        config,
-        {
-          mode: "implement",
-          memory: this.sessionStore.memoryContext(),
-        },
+      const result = await this.agent.applyPreparedChangeProposal(
+        this.lastChangeProposal.patch,
         (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
         async (status) => {
           await this.view?.webview.postMessage({ type: "status", text: status });
         },
-        this.abortController.signal,
-        "preapproved",
       );
       await this.sessionStore.recordTurn("assistant", result.response);
       this.view?.webview.postMessage({ type: "assistantDone" });
@@ -303,31 +293,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
         this.abortController.signal,
       );
-      const displayResponse =
+      let displayResponse =
         this.modeManager.current === "implement" && response.trim() && !this.agent.lastRunAppliedChange
           ? stripTrailingPatchApprovalPrompt(response)
           : response;
-      if (displayResponse !== response) {
-        this.view?.webview.postMessage({ type: "assistantReplace", text: displayResponse });
+      let preparedPatch: PreparedAssistantPatch | undefined;
+      if (this.modeManager.current === "implement" && displayResponse.trim() && !this.agent.lastRunAppliedChange) {
+        try {
+          const preparation = await this.agent.prepareAssistantChangeProposal(
+            prompt,
+            displayResponse,
+            this.contextManager.list(),
+            config,
+            async (status) => {
+              await this.view?.webview.postMessage({ type: "status", text: status });
+            },
+            this.abortController.signal,
+          );
+          if (preparation.status === "ready" && preparation.patch) {
+            preparedPatch = preparation.patch;
+          } else {
+            displayResponse = `${displayResponse}\n\n파일 적용 준비 실패: ${preparation.message}`;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          displayResponse = `${displayResponse}\n\n파일 적용 준비 실패: ${message}`;
+        }
       }
+      this.view?.webview.postMessage({ type: "assistantReplace", text: displayResponse });
       await this.sessionStore.recordTurn("assistant", displayResponse);
       this.view?.webview.postMessage({ type: "assistantDone" });
       if (this.modeManager.current === "plan" && response.trim()) {
         this.view?.webview.postMessage({ type: "planActions", text: response });
       }
-      if (this.modeManager.current === "implement" && this.agent.lastRunAppliedChange) {
-        this.lastChangeProposal = undefined;
-        this.pendingChangeApproval = false;
-        this.view?.webview.postMessage({ type: "clearChangeActions" });
-      } else if (this.modeManager.current === "implement" && displayResponse.trim()) {
-        this.lastChangeProposal = { prompt, response: displayResponse };
+      if (preparedPatch) {
+        this.lastChangeProposal = { prompt, response: displayResponse, patch: preparedPatch };
         this.pendingChangeApproval = true;
         this.view?.webview.postMessage({
           type: "changeActions",
-          text: "모델 변경안 생성이 완료되었습니다. 아직 실제 파일은 변경되지 않았습니다. 적용하시겠습니까?",
+          text: `실제 파일 원문과 검증한 패치가 준비되었습니다. 대상: ${preparedPatch.targetPaths.join(", ")}. 적용하시겠습니까?`,
         });
+        this.view?.webview.postMessage({ type: "status", text: "패치 승인 대기" });
+      } else {
+        this.lastChangeProposal = undefined;
+        this.pendingChangeApproval = false;
+        this.view?.webview.postMessage({ type: "clearChangeActions" });
+        this.view?.webview.postMessage({ type: "status", text: this.modeManager.current === "implement" ? "패치 준비 실패" : "준비" });
       }
-      this.view?.webview.postMessage({ type: "status", text: "준비" });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       this.view?.webview.postMessage({ type: "assistantError", text });
