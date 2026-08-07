@@ -5,6 +5,20 @@ import { LlmClient } from "./llmClient";
 import { readSummaryForContext } from "./projectInit";
 import { WorkspaceTools } from "./tools";
 
+interface PatchProposalChange {
+  path?: string;
+  fullContent?: string;
+  originalText?: string;
+  replacementText?: string;
+  createIfMissing?: boolean;
+  description?: string;
+}
+
+interface PatchProposal {
+  message?: string;
+  changes?: PatchProposalChange[];
+}
+
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
   "기본 답변 언어는 한국어입니다. 사용자가 명시적으로 다른 언어를 요청한 경우에만 예외로 처리하세요.",
@@ -31,10 +45,16 @@ const modePrompts: Record<AgentMode, string> = {
 };
 
 export class CodeAgent {
+  private lastRunAppliedWorkspaceChange = false;
+
   constructor(
     private readonly tools: WorkspaceTools,
     private readonly output: vscode.OutputChannel,
   ) {}
+
+  get lastRunAppliedChange(): boolean {
+    return this.lastRunAppliedWorkspaceChange;
+  }
 
   async run(
     prompt: string,
@@ -44,6 +64,7 @@ export class CodeAgent {
     onDelta: (text: string) => void,
     signal?: AbortSignal,
   ): Promise<string> {
+    this.lastRunAppliedWorkspaceChange = false;
     const contextPack = await this.buildContextPack(prompt, contextItems, config.maxContextTokens, options);
     const messages: ChatMessage[] = [
       { role: "system", content: `${baseSystemPrompt}\n\n${modePrompts[options.mode]}` },
@@ -99,15 +120,118 @@ export class CodeAgent {
     return accumulated;
   }
 
+  async applyAssistantChangeProposal(
+    originalPrompt: string,
+    assistantResponse: string,
+    contextItems: ContextItem[],
+    config: RuntimeConfig,
+    options: AgentRunOptions,
+    onDelta: (text: string) => void,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    this.lastRunAppliedWorkspaceChange = false;
+    const contextPack = await this.buildContextPack(originalPrompt, contextItems, config.maxContextTokens, options);
+    const proposal = await this.createPatchProposal(originalPrompt, assistantResponse, contextPack, config, signal);
+    const changes = proposal.changes ?? [];
+    if (changes.length === 0) {
+      const message = proposal.message?.trim() || "적용할 수 있는 안전한 변경안을 찾지 못했습니다. 파일 경로와 기존 원문이 포함되도록 다시 요청하세요.";
+      onDelta(message);
+      return message;
+    }
+    const unsafeFullContentPaths = await this.existingFullContentPaths(changes);
+    if (unsafeFullContentPaths.length > 0) {
+      const message = [
+        "기존 파일 전체 덮어쓰기는 인코딩이나 들여쓰기 스타일을 깨뜨릴 수 있어 적용하지 않았습니다.",
+        `대상 파일: ${unsafeFullContentPaths.join(", ")}`,
+        "해당 파일을 열거나 File로 추가한 뒤, 기존 원문 일부를 기준으로 다시 수정 요청하세요.",
+      ].join("\n");
+      onDelta(message);
+      return message;
+    }
+
+    const result = await this.tools.applyPatchAfterUserApproval({ changes }, "implement");
+    this.lastRunAppliedWorkspaceChange = result.includes("패치를 적용했습니다.");
+    const response = [proposal.message?.trim(), result].filter(Boolean).join("\n\n");
+    onDelta(response);
+    return response;
+  }
+
   private async executeToolCall(toolCall: ChatToolCall, mode: AgentMode): Promise<string> {
     try {
       const result = await this.tools.executeTool(toolCall.function.name, toolCall.function.arguments, mode);
+      if (toolCall.function.name === "applyPatchAfterUserApproval" && result.includes("패치를 적용했습니다.")) {
+        this.lastRunAppliedWorkspaceChange = true;
+      }
       return truncateToTokens(result, 12000);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.output.appendLine(`도구 '${toolCall.function.name}' 실행 실패: ${message}`);
       return JSON.stringify({ error: message });
     }
+  }
+
+  private async createPatchProposal(
+    originalPrompt: string,
+    assistantResponse: string,
+    contextPack: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<PatchProposal> {
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content: [
+          "당신은 Company Code AI의 변경안 적용 변환기입니다.",
+          "assistantResponse에 포함된 코드 변경 설명을 applyPatchAfterUserApproval 도구 인자 JSON으로만 변환하세요.",
+          "반드시 JSON 객체만 반환하세요. markdown fence, 설명 문장, 주석을 JSON 밖에 쓰지 마세요.",
+          "JSON 형식은 { \"message\": string, \"changes\": array } 입니다.",
+          "기존 파일 변경은 반드시 originalText/replacementText만 사용하세요. 기존 파일에 fullContent를 사용하지 마세요.",
+          "새 파일 생성에만 fullContent와 createIfMissing: true를 사용하세요.",
+          "originalText는 워크스페이스 컨텍스트에 있는 원문을 정확히 복사해야 합니다.",
+          "기존 파일의 인코딩, 줄바꿈, 들여쓰기 스타일을 깨지 않도록 최소 범위만 변경하세요.",
+          "안전한 패치를 만들 수 없으면 changes를 빈 배열로 두고 message에 이유를 한국어로 적으세요.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          "워크스페이스 컨텍스트:",
+          contextPack,
+          "사용자의 원래 요청:",
+          truncateToTokens(originalPrompt, 12000),
+          "모델이 채팅 화면에 출력한 변경안:",
+          truncateToTokens(assistantResponse, 50000),
+        ].join("\n\n"),
+      },
+    ];
+
+    const client = new LlmClient(config);
+    let content = "";
+    const result = await client.complete({
+      messages,
+      signal,
+      onDelta: (delta) => {
+        content += delta;
+      },
+    });
+    return parsePatchProposal(result.content || content);
+  }
+
+  private async existingFullContentPaths(changes: PatchProposalChange[]): Promise<string[]> {
+    const paths: string[] = [];
+    for (const change of changes) {
+      if (typeof change.fullContent !== "string" || !change.path) {
+        continue;
+      }
+      const uri = this.tools.resolveWorkspacePath(change.path);
+      try {
+        await vscode.workspace.fs.stat(uri);
+        paths.push(change.path);
+      } catch {
+        // 새 파일 생성은 fullContent를 허용합니다.
+      }
+    }
+    return paths;
   }
 
   private async buildContextPack(
@@ -245,4 +369,43 @@ function tryParseJsonBlock(content: string): any {
   } catch {
     return undefined;
   }
+}
+
+function parsePatchProposal(content: string): PatchProposal {
+  const parsed = tryParseJsonBlock(content);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("변경안 적용 응답이 JSON 객체가 아닙니다.");
+  }
+
+  const raw = parsed as PatchProposal;
+  const changes = Array.isArray(raw.changes) ? raw.changes.map(normalizePatchChange).filter(isPatchProposalChange) : [];
+  return {
+    message: typeof raw.message === "string" ? raw.message : undefined,
+    changes,
+  };
+}
+
+function normalizePatchChange(change: PatchProposalChange): PatchProposalChange | undefined {
+  if (!change || typeof change !== "object" || typeof change.path !== "string" || !change.path.trim()) {
+    return undefined;
+  }
+  const normalized: PatchProposalChange = {
+    path: change.path.trim(),
+    description: typeof change.description === "string" ? change.description : undefined,
+  };
+  if (typeof change.originalText === "string" && typeof change.replacementText === "string") {
+    normalized.originalText = change.originalText;
+    normalized.replacementText = change.replacementText;
+    return normalized;
+  }
+  if (typeof change.fullContent === "string") {
+    normalized.fullContent = change.fullContent;
+    normalized.createIfMissing = change.createIfMissing === true;
+    return normalized;
+  }
+  return undefined;
+}
+
+function isPatchProposalChange(change: PatchProposalChange | undefined): change is PatchProposalChange {
+  return Boolean(change);
 }

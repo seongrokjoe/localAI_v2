@@ -273,16 +273,6 @@ export class WorkspaceTools {
       throw new Error("제공된 변경이 없습니다.");
     }
 
-    const labels = changes.map((change) => change.path ?? "[missing path]").join(", ");
-    const approved = await vscode.window.showWarningMessage(
-      `워크스페이스 변경 ${changes.length}개를 적용할까요? ${labels}`,
-      { modal: true },
-      "적용",
-    );
-    if (approved !== "적용") {
-      return "사용자가 패치 적용을 거부했습니다.";
-    }
-
     const edit = new vscode.WorkspaceEdit();
     const snapshots: FileSnapshotChange[] = [];
     for (const change of changes) {
@@ -300,7 +290,7 @@ export class WorkspaceTools {
         if (!exists && !change.createIfMissing) {
           throw new Error(`${relativePath} 파일이 없습니다. 새로 만들려면 createIfMissing을 true로 설정하세요.`);
         }
-        const after = change.fullContent;
+        const after = exists ? adaptLineEndings(change.fullContent, current) : change.fullContent;
         replaceWholeDocument(edit, uri, exists ? current : "", after);
         snapshots.push({ path: relativePath, before: exists ? current : "", after, description: change.description });
         continue;
@@ -310,16 +300,28 @@ export class WorkspaceTools {
         if (!exists) {
           throw new Error(`${relativePath} 파일이 없습니다.`);
         }
-        if (!current.includes(change.originalText)) {
+        const original = findOriginalText(current, change.originalText);
+        if (original === undefined) {
           throw new Error(`${relativePath}에서 originalText를 찾지 못했습니다.`);
         }
-        const next = current.replace(change.originalText, change.replacementText);
+        const replacement = adaptLineEndings(change.replacementText, current);
+        const next = current.replace(original, replacement);
         replaceWholeDocument(edit, uri, current, next);
         snapshots.push({ path: relativePath, before: current, after: next, description: change.description });
         continue;
       }
 
       throw new Error(`${relativePath}에는 fullContent 또는 originalText/replacementText가 필요합니다.`);
+    }
+
+    const labels = changes.map((change) => change.path ?? "[missing path]").join(", ");
+    const approved = await vscode.window.showWarningMessage(
+      `워크스페이스 변경 ${changes.length}개를 적용할까요? ${labels}`,
+      { modal: true },
+      "적용",
+    );
+    if (approved !== "적용") {
+      return "사용자가 패치 적용을 거부했습니다.";
     }
 
     const ok = await vscode.workspace.applyEdit(edit);
@@ -388,6 +390,25 @@ function replaceWholeDocument(edit: vscode.WorkspaceEdit, uri: vscode.Uri, curre
   }
   const lineCount = current.split(/\r\n|\r|\n/).length;
   edit.replace(uri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(lineCount, 0)), next);
+}
+
+function findOriginalText(current: string, originalText: string): string | undefined {
+  if (current.includes(originalText)) {
+    return originalText;
+  }
+  const eolAdjusted = adaptLineEndings(originalText, current);
+  return current.includes(eolAdjusted) ? eolAdjusted : undefined;
+}
+
+function adaptLineEndings(text: string, reference: string): string {
+  const eol = dominantLineEnding(reference);
+  return text.replace(/\r\n|\r|\n/g, eol);
+}
+
+function dominantLineEnding(text: string): string {
+  const crlf = text.match(/\r\n/g)?.length ?? 0;
+  const lf = text.match(/(?<!\r)\n/g)?.length ?? 0;
+  return crlf > lf ? "\r\n" : "\n";
 }
 
 function lineNumberAt(content: string, index: number): number {

@@ -16,6 +16,7 @@ interface WebviewMessage {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortController?: AbortController;
+  private lastChangeProposal?: { prompt: string; response: string };
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -97,6 +98,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "implementPlan":
         await this.implementPlan(message.text ?? "");
         break;
+      case "applyLastChangeProposal":
+        await this.applyLastChangeProposal();
+        break;
       case "refinePlan":
         this.view?.webview.postMessage({ type: "setInput", text: `이 계획을 더 구체화해줘:\n\n${message.text ?? ""}` });
         break;
@@ -155,6 +159,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.send(`승인된 아래 계획을 구현해줘. 변경 범위는 최소화하고, 패치를 적용하기 전에 파일 변경 승인을 요청해줘. 설명은 한국어로 작성해줘.\n\n${trimmed}`);
   }
 
+  private async applyLastChangeProposal(): Promise<void> {
+    if (!this.lastChangeProposal) {
+      vscode.window.showWarningMessage("적용할 최근 변경안이 없습니다.");
+      return;
+    }
+    if (this.abortController) {
+      vscode.window.showWarningMessage("Company Code AI 요청이 이미 실행 중입니다.");
+      return;
+    }
+
+    this.view?.webview.postMessage({ type: "assistantStart" });
+    this.view?.webview.postMessage({ type: "status", text: "변경안 분석 중" });
+
+    this.abortController = new AbortController();
+    try {
+      const config = await readRuntimeConfig(this.secrets);
+      const response = await this.agent.applyAssistantChangeProposal(
+        this.lastChangeProposal.prompt,
+        this.lastChangeProposal.response,
+        this.contextManager.list(),
+        config,
+        {
+          mode: "implement",
+          memory: this.sessionStore.memoryContext(),
+        },
+        (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
+        this.abortController.signal,
+      );
+      await this.sessionStore.recordTurn("assistant", response);
+      this.view?.webview.postMessage({ type: "assistantDone" });
+      this.view?.webview.postMessage({ type: "status", text: "준비" });
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      this.view?.webview.postMessage({ type: "assistantError", text });
+      this.view?.webview.postMessage({ type: "status", text: "오류" });
+    } finally {
+      this.abortController = undefined;
+    }
+  }
+
   private async send(text: string): Promise<void> {
     const prompt = text.trim();
     if (!prompt) {
@@ -197,6 +241,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.view?.webview.postMessage({ type: "assistantDone" });
       if (this.modeManager.current === "plan" && response.trim()) {
         this.view?.webview.postMessage({ type: "planActions", text: response });
+      }
+      if (this.modeManager.current === "implement" && response.trim() && !this.agent.lastRunAppliedChange) {
+        this.lastChangeProposal = { prompt, response };
+        this.view?.webview.postMessage({ type: "changeActions" });
       }
       this.view?.webview.postMessage({ type: "status", text: "준비" });
     } catch (error) {
@@ -417,6 +465,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'assistantDone') currentAssistant = undefined;
       if (message.type === 'planActions') renderPlanActions(message.text ?? '');
+      if (message.type === 'changeActions') renderChangeActions();
       if (message.type === 'assistantError') {
         if (currentAssistant) currentAssistant.remove();
         currentAssistant = undefined;
@@ -445,6 +494,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       implementMode.classList.toggle('active', state.mode === 'implement');
       const scope = state.activeScope ? ' - ' + state.activeScope : '';
       status.textContent = (state.mode === 'implement' ? '구현' : '계획') + scope;
+    }
+
+    function renderChangeActions() {
+      const actions = document.createElement('div');
+      actions.className = 'plan-actions';
+      const apply = actionButton('변경안 적용', () => vscode.postMessage({ type: 'applyLastChangeProposal' }));
+      const discard = actionButton('버리기', () => actions.remove());
+      actions.append(apply, discard);
+      messages.appendChild(actions);
+      messages.scrollTop = messages.scrollHeight;
     }
 
     function renderPlanActions(planText) {
