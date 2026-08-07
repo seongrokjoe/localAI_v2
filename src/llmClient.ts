@@ -17,6 +17,7 @@ export class LlmClient {
       model: this.config.model,
       messages: options.messages,
       stream: true,
+      max_tokens: this.config.maxOutputTokens,
     };
     if (options.tools && options.tools.length > 0) {
       body.tools = options.tools;

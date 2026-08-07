@@ -4,6 +4,7 @@ export interface ExtensionSettings {
   serverUrl: string;
   model: string;
   maxContextTokens: number;
+  maxOutputTokens: number;
   allowedServerHosts: string[];
   toolCallMode: ToolCallMode;
   requestTimeoutMs: number;

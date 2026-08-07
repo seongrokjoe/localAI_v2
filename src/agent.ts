@@ -95,8 +95,7 @@ export class CodeAgent {
   private async buildContextPack(prompt: string, contextItems: ContextItem[], maxTokens: number): Promise<string> {
     const sections: string[] = [];
     const budget = Math.min(maxTokens, 200000);
-    const reserve = 40000;
-    const usable = Math.max(8000, budget - reserve);
+    const usable = Math.max(8000, budget);
     let used = 0;
 
     const addSection = (title: string, content: string, maxSectionTokens: number) => {

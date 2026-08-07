@@ -86,10 +86,17 @@
         },
         "companyCodeAI.maxContextTokens": {
           "type": "number",
-          "default": 160000,
+          "default": 200000,
           "minimum": 8000,
           "maximum": 200000,
-          "markdownDescription": "Target maximum context tokens sent to the server. The extension also enforces a 200k hard cap."
+          "markdownDescription": "Target maximum input context tokens sent to the server. The extension enforces a 200k input hard cap."
+        },
+        "companyCodeAI.maxOutputTokens": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1024,
+          "maximum": 60000,
+          "markdownDescription": "Maximum output tokens requested from the internal Chat Completions-compatible server."
         },
         "companyCodeAI.allowedServerHosts": {
           "type": "array",

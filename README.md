@@ -35,7 +35,9 @@ After installation, configure:
 ```json
 {
   "companyCodeAI.serverUrl": "http://internal-llm-server:8000/v1",
-  "companyCodeAI.model": "internal-model"
+  "companyCodeAI.model": "internal-model",
+  "companyCodeAI.maxContextTokens": 200000,
+  "companyCodeAI.maxOutputTokens": 60000
 }
 ```
 

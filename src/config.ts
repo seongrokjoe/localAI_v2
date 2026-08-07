@@ -11,7 +11,8 @@ export function readSettings(): ExtensionSettings {
   return {
     serverUrl: config.get<string>("serverUrl", ""),
     model: config.get<string>("model", ""),
-    maxContextTokens: clamp(config.get<number>("maxContextTokens", 160000), 8000, 200000),
+    maxContextTokens: clamp(config.get<number>("maxContextTokens", 200000), 8000, 200000),
+    maxOutputTokens: clamp(config.get<number>("maxOutputTokens", 60000), 1024, 60000),
     allowedServerHosts: config.get<string[]>("allowedServerHosts", []),
     toolCallMode: parseToolCallMode(toolCallMode),
     requestTimeoutMs: clamp(config.get<number>("requestTimeoutMs", 120000), 10000, 600000),
