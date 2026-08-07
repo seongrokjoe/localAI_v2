@@ -15,6 +15,12 @@ export class ContextManager {
       content: text,
       uri: document.uri.toString(),
       languageId: document.languageId,
+      range: {
+        startLine: range.start.line,
+        startCharacter: range.start.character,
+        endLine: range.end.line,
+        endCharacter: range.end.character,
+      },
     });
   }
 

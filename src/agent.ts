@@ -8,6 +8,7 @@ import {
   ChatMessage,
   RuntimeConfig,
   ChatToolCall,
+  ChatToolDefinition,
   PatchApplyOutcome,
   PatchPreparationOutcome,
   PreparedAssistantPatch,
@@ -19,6 +20,7 @@ import { readSummaryForContext } from "./projectInit";
 import { formatPatchApplyOutcome, WorkspaceTools } from "./tools";
 import { parsePatchResponse, parseTargetResponse } from "./patchProtocol";
 import { isLineRangeChange } from "./patchText";
+import { extractReplacementContent } from "./proposalText";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -56,6 +58,92 @@ export class CodeAgent {
 
   get lastRunAppliedChange(): boolean {
     return this.lastRunAppliedWorkspaceChange;
+  }
+
+  async generateRegionReplacement(
+    prompt: string,
+    assistantResponse: string,
+    path: string,
+    languageId: string,
+    regionId: string,
+    originalText: string,
+    config: RuntimeConfig,
+    onStatus?: (text: string) => void | Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<{ text: string; source: "tool" | "fence" | "raw" }> {
+    await onStatus?.(`AI 작업본 코드 생성 중: ${path}`);
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content: [
+          "당신은 사용자가 선택한 코드 범위의 수정 완료본을 생성합니다.",
+          "선택 범위의 앞뒤 위치, 파일 경로, 줄 번호를 추측하지 마세요.",
+          "기존 범위 전체를 대체할 완성된 코드만 반환하세요.",
+          "가능하면 submitRegionReplacement 도구를 호출하세요. 도구를 사용할 수 없으면 코드 블록 하나만 반환하세요.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          `regionId: ${regionId}`,
+          `파일: ${path}`,
+          `언어: ${languageId}`,
+          "사용자 요청:",
+          truncateToTokens(prompt, 12000),
+          "앞서 설명한 구현 내용:",
+          truncateToTokens(assistantResponse, 30000),
+          "대체할 현재 코드 범위:",
+          originalText,
+        ].join("\n\n"),
+      },
+    ];
+    const tool: ChatToolDefinition = {
+      type: "function",
+      function: {
+        name: "submitRegionReplacement",
+        description: "선택된 regionId에 대응하는 수정 완료 코드를 제출합니다.",
+        parameters: {
+          type: "object",
+          properties: {
+            regionId: { type: "string" },
+            replacementText: { type: "string" },
+          },
+          required: ["regionId", "replacementText"],
+          additionalProperties: false,
+        },
+      },
+    };
+
+    const client = new LlmClient(config);
+    if (config.toolCallMode === "auto" || config.toolCallMode === "native") {
+      try {
+        const result = await client.complete({ messages, tools: [tool], signal, onDelta: () => undefined });
+        for (const call of result.toolCalls) {
+          if (call.function.name !== "submitRegionReplacement") {
+            continue;
+          }
+          const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
+          const returnedId = String(args.regionId ?? "");
+          const replacement = args.replacementText;
+          if (returnedId === regionId && typeof replacement === "string") {
+            return { text: replacement, source: "tool" };
+          }
+        }
+        if (result.content.trim()) {
+          const extracted = extractReplacementContent(result.content);
+          return { ...extracted, source: extracted.source };
+        }
+      } catch (error) {
+        this.output.appendLine(`[작업본] native replacement 응답을 사용할 수 없어 일반 응답으로 재시도합니다: ${errorMessage(error)}`);
+      }
+    }
+
+    const result = await client.complete({ messages, signal, onDelta: () => undefined });
+    const extracted = extractReplacementContent(result.content);
+    if (!extracted.text.trim()) {
+      throw new Error(`${path}의 수정 완료 코드를 LLM이 반환하지 않았습니다.`);
+    }
+    return { ...extracted, source: extracted.source };
   }
 
   async run(
@@ -675,4 +763,8 @@ function lineNumberAtOffset(content: string, offset: number): number {
 
 function hashText(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

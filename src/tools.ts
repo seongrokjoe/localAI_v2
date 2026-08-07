@@ -386,6 +386,30 @@ export class WorkspaceTools {
     }
   }
 
+  async applyCompletedFiles(
+    files: Array<{ path: string; expectedText: string; finalText: string }>,
+    mode: AgentMode,
+  ): Promise<PatchApplyOutcome> {
+    assertPatchAllowed(mode);
+    this.beginPatchDiagnostics("AI 작업본 적용");
+    try {
+      for (const file of files) {
+        const uri = this.resolveWorkspacePath(file.path);
+        const state = await readTextFileState(uri);
+        this.appendPatchDiagnostic(`작업본 대상: ${file.path} -> ${uri.scheme === "file" ? uri.fsPath : uri.toString(true)}`);
+        if (!state.exists || state.text !== file.expectedText) {
+          throw new Error(`${file.path} 파일이 AI 작업본을 만든 이후 변경되었습니다. 새 작업본을 생성하세요.`);
+        }
+      }
+      const prepared = await this.preparePatch({
+        changes: files.map((file) => ({ path: file.path, fullContent: file.finalText })),
+      });
+      return await this.applyPreparedPatch(prepared, mode);
+    } catch (error) {
+      return this.finishPatchOutcome(failedOutcome(errorMessage(error)));
+    }
+  }
+
   private async preparePatch(rawArgs: unknown): Promise<PreparedPatch> {
     const args = rawArgs as PatchInput;
     const changes = args.changes ?? [];

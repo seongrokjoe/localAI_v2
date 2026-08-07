@@ -24,7 +24,39 @@ export interface ContextItem {
   content: string;
   uri?: string;
   languageId?: string;
+  range?: {
+    startLine: number;
+    startCharacter: number;
+    endLine: number;
+    endCharacter: number;
+  };
   createdAt: number;
+}
+
+export interface EditRegion {
+  id: string;
+  path: string;
+  startOffset: number;
+  endOffset: number;
+  originalText: string;
+  replacementText: string;
+  originalHash: string;
+  label: string;
+}
+
+export interface ProposalFileState {
+  path: string;
+  absolutePath: string;
+  draftPath: string;
+  baseHash: string;
+  unresolvedConflicts: number;
+}
+
+export interface ProposalSessionState {
+  id: string;
+  status: "draft" | "ready" | "reviewed" | "applied" | "failed";
+  files: ProposalFileState[];
+  message: string;
 }
 
 export interface ChatMessage {

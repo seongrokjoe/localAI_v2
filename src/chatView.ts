@@ -4,7 +4,9 @@ import { readRuntimeConfig, secretTokenKey, updateSetting } from "./config";
 import { ContextManager } from "./context";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
-import { AgentMode, PreparedAssistantPatch } from "./types";
+import { AgentMode, ProposalSessionState } from "./types";
+import { ProposalManager } from "./proposalManager";
+import { formatPatchApplyOutcome } from "./tools";
 
 interface WebviewMessage {
   type: string;
@@ -22,8 +24,7 @@ interface SendOptions {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortController?: AbortController;
-  private lastChangeProposal?: { prompt: string; response: string; patch: PreparedAssistantPatch };
-  private pendingChangeApproval = false;
+  private lastImplementation?: { prompt: string; response: string };
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -32,9 +33,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly modeManager: ModeManager,
     private readonly sessionStore: SessionStore,
     private readonly agent: CodeAgent,
+    private readonly proposalManager: ProposalManager,
   ) {
     this.contextManager.onDidChange(() => this.postContext());
     this.modeManager.onDidChange(() => this.postState());
+    this.proposalManager.onDidChangeState((state) => this.postProposalState(state));
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -47,6 +50,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => this.handleMessage(message));
     this.postContext();
     this.postState();
+    void this.proposalManager.currentState().then((state) => this.postProposalState(state));
   }
 
   async reveal(): Promise<void> {
@@ -105,14 +109,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "implementPlan":
         await this.implementPlan(message.text ?? "");
         break;
-      case "applyLastChangeProposal":
-        await this.applyLastChangeProposal();
+      case "createProposal":
+        await this.createProposal();
         break;
-      case "approveChangeProposal":
-        await this.applyLastChangeProposal();
+      case "openProposal":
+        await this.runProposalAction(() => this.proposalManager.openDraft());
         break;
-      case "rejectChangeProposal":
-        this.rejectChangeProposal();
+      case "reviewProposal":
+        await this.runProposalAction(() => this.proposalManager.openFinalDiff());
+        break;
+      case "applyProposal":
+        await this.applyProposal();
+        break;
+      case "discardProposal":
+        await this.runProposalAction(() => this.proposalManager.discard());
         break;
       case "refinePlan":
         this.view?.webview.postMessage({ type: "setInput", text: `이 계획을 더 구체화해줘:\n\n${message.text ?? ""}` });
@@ -179,70 +189,63 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  private async applyLastChangeProposal(): Promise<void> {
-    if (!this.lastChangeProposal) {
-      vscode.window.showWarningMessage("적용할 최근 변경안이 없습니다.");
+  private async createProposal(): Promise<void> {
+    if (!this.lastImplementation) {
+      vscode.window.showWarningMessage("AI 작업본으로 만들 최근 구현 응답이 없습니다.");
       return;
     }
     if (this.abortController) {
       vscode.window.showWarningMessage("Company Code AI 요청이 이미 실행 중입니다.");
       return;
     }
-
-    this.pendingChangeApproval = false;
-    this.view?.webview.postMessage({ type: "clearChangeActions" });
-    this.view?.webview.postMessage({ type: "assistantStart", text: "검증된 패치 적용 중" });
-    this.view?.webview.postMessage({ type: "status", text: "검증된 패치 적용 중" });
-
+    this.view?.webview.postMessage({ type: "assistantStart", text: "AI 작업본 준비 중" });
+    this.view?.webview.postMessage({ type: "status", text: "AI 작업본 준비 중" });
     this.abortController = new AbortController();
     try {
-      const result = await this.agent.applyPreparedChangeProposal(
-        this.lastChangeProposal.patch,
-        (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
+      const config = await readRuntimeConfig(this.secrets);
+      const state = await this.proposalManager.create(
+        this.lastImplementation.prompt,
+        this.lastImplementation.response,
+        this.contextManager.list(),
+        config,
         async (status) => {
           await this.view?.webview.postMessage({ type: "status", text: status });
         },
+        this.abortController.signal,
       );
-      await this.sessionStore.recordTurn("assistant", result.response);
+      this.view?.webview.postMessage({ type: "assistantReplace", text: "AI 작업본을 만들었습니다. 편집기에서 conflict를 해결하고 완성본을 검토하세요." });
       this.view?.webview.postMessage({ type: "assistantDone" });
-      if (result.outcome.status === "applied") {
-        this.lastChangeProposal = undefined;
-        this.pendingChangeApproval = false;
-        this.view?.webview.postMessage({ type: "clearChangeActions" });
-        this.view?.webview.postMessage({ type: "status", text: "파일 변경 완료" });
-      } else {
-        this.pendingChangeApproval = true;
-        this.view?.webview.postMessage({
-          type: "changeActions",
-          text:
-            result.outcome.status === "failed"
-              ? "파일 적용에 실패했습니다. 마지막 패치 진단을 확인한 뒤 다시 시도하거나 변경안을 버리세요."
-              : "실제 파일은 변경되지 않았습니다. 변경안 적용을 다시 시도하시겠습니까?",
-        });
-        this.view?.webview.postMessage({ type: "status", text: result.outcome.status === "failed" ? "파일 적용 실패" : "파일 미변경" });
-      }
+      this.postProposalState(state);
+      this.view?.webview.postMessage({ type: "status", text: "작업본 편집 중" });
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      this.view?.webview.postMessage({ type: "assistantError", text });
-      this.pendingChangeApproval = Boolean(this.lastChangeProposal);
-      if (this.lastChangeProposal) {
-        this.view?.webview.postMessage({
-          type: "changeActions",
-          text: "파일 적용 중 오류가 발생했습니다. 변경안을 다시 적용하거나 버릴 수 있습니다.",
-        });
-      }
-      this.view?.webview.postMessage({ type: "status", text: "오류" });
+      this.view?.webview.postMessage({ type: "assistantError", text: error instanceof Error ? error.message : String(error) });
+      this.view?.webview.postMessage({ type: "status", text: "작업본 생성 실패" });
     } finally {
       this.abortController = undefined;
     }
   }
 
-  private rejectChangeProposal(): void {
-    this.lastChangeProposal = undefined;
-    this.pendingChangeApproval = false;
-    this.view?.webview.postMessage({ type: "clearChangeActions" });
-    this.view?.webview.postMessage({ type: "assistant", text: "변경안을 버렸습니다. 파일은 변경하지 않았습니다." });
-    this.view?.webview.postMessage({ type: "status", text: "준비" });
+  private async applyProposal(): Promise<void> {
+    await this.runProposalAction(async () => {
+      const outcome = await this.proposalManager.apply();
+      this.view?.webview.postMessage({ type: "assistant", text: formatPatchApplyOutcome(outcome) });
+      this.view?.webview.postMessage({ type: "status", text: outcome.status === "applied" ? "파일 변경 완료" : "파일 미변경" });
+    });
+  }
+
+  private async runProposalAction(action: () => Promise<void>): Promise<void> {
+    try {
+      await action();
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(text);
+      this.view?.webview.postMessage({ type: "assistant", text });
+      this.view?.webview.postMessage({ type: "status", text: "작업본 오류" });
+    }
+  }
+
+  private postProposalState(state: ProposalSessionState | undefined): void {
+    this.view?.webview.postMessage({ type: "proposalState", state });
   }
 
   private async send(text: string, options: SendOptions = {}): Promise<void> {
@@ -252,16 +255,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (this.abortController) {
       vscode.window.showWarningMessage("Company Code AI 요청이 이미 실행 중입니다.");
-      return;
-    }
-    const pendingDecision = this.pendingChangeApproval ? parseChangeApprovalDecision(prompt) : undefined;
-    if (pendingDecision) {
-      this.view?.webview.postMessage({ type: "user", text: prompt });
-      if (pendingDecision === "approve") {
-        await this.applyLastChangeProposal();
-      } else {
-        this.rejectChangeProposal();
-      }
       return;
     }
     const slash = prompt.toLowerCase();
@@ -293,58 +286,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
         this.abortController.signal,
       );
-      let displayResponse =
+      const displayResponse =
         this.modeManager.current === "implement" && response.trim() && !this.agent.lastRunAppliedChange
           ? stripTrailingPatchApprovalPrompt(response)
           : response;
-      let preparedPatch: PreparedAssistantPatch | undefined;
-      if (this.modeManager.current === "implement" && displayResponse.trim() && !this.agent.lastRunAppliedChange) {
-        try {
-          const preparation = await this.agent.prepareAssistantChangeProposal(
-            prompt,
-            displayResponse,
-            this.contextManager.list(),
-            config,
-            async (status) => {
-              await this.view?.webview.postMessage({ type: "status", text: status });
-            },
-            this.abortController.signal,
-          );
-          if (preparation.status === "ready" && preparation.patch) {
-            preparedPatch = preparation.patch;
-          } else {
-            displayResponse = `${displayResponse}\n\n파일 적용 준비 실패: ${preparation.message}`;
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          displayResponse = `${displayResponse}\n\n파일 적용 준비 실패: ${message}`;
-        }
-      }
       this.view?.webview.postMessage({ type: "assistantReplace", text: displayResponse });
       await this.sessionStore.recordTurn("assistant", displayResponse);
       this.view?.webview.postMessage({ type: "assistantDone" });
       if (this.modeManager.current === "plan" && response.trim()) {
         this.view?.webview.postMessage({ type: "planActions", text: response });
       }
-      if (preparedPatch) {
-        this.lastChangeProposal = { prompt, response: displayResponse, patch: preparedPatch };
-        this.pendingChangeApproval = true;
-        this.view?.webview.postMessage({
-          type: "changeActions",
-          text: [
-            `실제 파일 원문과 검증한 패치가 준비되었습니다. 대상: ${preparedPatch.targetPaths.join(", ")}`,
-            preparedPatch.preview,
-            "이 변경을 실제 파일에 적용하시겠습니까?",
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-        });
-        this.view?.webview.postMessage({ type: "status", text: "패치 승인 대기" });
+      if (this.modeManager.current === "implement" && displayResponse.trim() && !this.agent.lastRunAppliedChange) {
+        this.lastImplementation = { prompt, response: displayResponse };
+        this.view?.webview.postMessage({ type: "proposalOffer" });
+        this.view?.webview.postMessage({ type: "status", text: "AI 작업본 생성 대기" });
       } else {
-        this.lastChangeProposal = undefined;
-        this.pendingChangeApproval = false;
-        this.view?.webview.postMessage({ type: "clearChangeActions" });
-        this.view?.webview.postMessage({ type: "status", text: this.modeManager.current === "implement" ? "패치 준비 실패" : "준비" });
+        this.view?.webview.postMessage({ type: "status", text: "준비" });
       }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
@@ -595,6 +552,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'planActions') renderPlanActions(message.text ?? '');
       if (message.type === 'changeActions') renderChangeActions(message.text);
       if (message.type === 'clearChangeActions') clearChangeActions();
+      if (message.type === 'proposalOffer') renderProposalOffer();
+      if (message.type === 'proposalState') renderProposalState(message.state);
       if (message.type === 'assistantError') {
         stopTimer();
         if (currentAssistant) currentAssistant.remove();
@@ -719,6 +678,54 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       scrollMessagesToBottom(shouldFollow);
     }
 
+    function renderProposalOffer() {
+      const shouldFollow = isNearMessagesBottom();
+      clearChangeActions();
+      activeChangeQuestion = appendMessage(
+        'assistant',
+        '원본 파일은 아직 변경되지 않았습니다. 수정할 파일과 코드 범위를 선택해 편집 가능한 AI 작업본을 만드세요.',
+        shouldFollow,
+      );
+      const actions = document.createElement('div');
+      actions.className = 'plan-actions';
+      actions.append(
+        actionButton('AI 작업본 만들기', () => vscode.postMessage({ type: 'createProposal' })),
+        actionButton('응답만 유지', () => clearChangeActions()),
+      );
+      messages.appendChild(actions);
+      activeChangeActions = actions;
+      scrollMessagesToBottom(shouldFollow);
+    }
+
+    function renderProposalState(state) {
+      if (!state) {
+        clearChangeActions();
+        return;
+      }
+      const shouldFollow = isNearMessagesBottom();
+      clearChangeActions();
+      const unresolved = (state.files ?? []).reduce((total, file) => total + (file.unresolvedConflicts ?? 0), 0);
+      const files = (state.files ?? []).map((file) => file.path + ' (남은 conflict ' + file.unresolvedConflicts + '개)').join('\n');
+      activeChangeQuestion = appendMessage(
+        'assistant',
+        [state.message, files, '작업본의 conflict를 해결한 뒤 완성본을 검토하고 원본에 저장하세요.'].filter(Boolean).join('\n\n'),
+        shouldFollow,
+      );
+      const actions = document.createElement('div');
+      actions.className = 'plan-actions';
+      actions.appendChild(actionButton('작업본 열기', () => vscode.postMessage({ type: 'openProposal' })));
+      if (unresolved === 0) {
+        actions.appendChild(actionButton('완성본 검토', () => vscode.postMessage({ type: 'reviewProposal' })));
+        if (state.status === 'reviewed') {
+          actions.appendChild(actionButton('원본에 저장', () => vscode.postMessage({ type: 'applyProposal' })));
+        }
+      }
+      actions.appendChild(actionButton('작업본 버리기', () => vscode.postMessage({ type: 'discardProposal' })));
+      messages.appendChild(actions);
+      activeChangeActions = actions;
+      scrollMessagesToBottom(shouldFollow);
+    }
+
     function clearChangeActions() {
       if (activeChangeQuestion) {
         activeChangeQuestion.remove();
@@ -819,17 +826,6 @@ function createNonce(): string {
     text += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return text;
-}
-
-function parseChangeApprovalDecision(text: string): "approve" | "reject" | undefined {
-  const normalized = text.trim().toLowerCase().replace(/[.!?。！？\s]+$/g, "");
-  if (["예", "네", "응", "ㅇ", "y", "yes", "ok", "okay", "적용", "승인", "진행"].includes(normalized)) {
-    return "approve";
-  }
-  if (["아니오", "아니요", "아니", "ㄴ", "n", "no", "취소", "버리기", "거부"].includes(normalized)) {
-    return "reject";
-  }
-  return undefined;
 }
 
 function stripTrailingPatchApprovalPrompt(text: string): string {

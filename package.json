@@ -2,7 +2,7 @@
   "name": "company-code-ai",
   "displayName": "Company Code AI",
   "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,
@@ -35,7 +35,8 @@
     "onCommand:companyCodeAI.setAuthToken",
     "onCommand:companyCodeAI.clearAuthToken",
     "onCommand:companyCodeAI.addSelectionToChat",
-    "onCommand:companyCodeAI.addCurrentFileToChat"
+    "onCommand:companyCodeAI.addCurrentFileToChat",
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -236,6 +237,7 @@
     "compile": "tsc -p ./",
     "test:encoding": "npm run compile && node scripts/test-text-encoding.mjs",
     "test:patch": "npm run compile && node scripts/test-patch-protocol.mjs",
+    "test:proposal": "npm run compile && node scripts/test-proposal-text.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",
