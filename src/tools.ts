@@ -13,6 +13,7 @@ import {
 } from "./types";
 import { assertSafePathSegment } from "./security";
 import { decodeText, detectTextEncoding, encodeText, encodingForNewFile, TextEncodingInfo } from "./textEncoding";
+import { applyLineRangeChanges, findOriginalTextMatch, isLineRangeChange } from "./patchText";
 
 const excludeGlob = "**/{.git,node_modules,dist,out,build,.company-code-ai,.vscode-test}/**";
 
@@ -184,6 +185,10 @@ export class WorkspaceTools {
                   fullContent: { type: "string" },
                   originalText: { type: "string" },
                   replacementText: { type: "string" },
+                  startLine: { type: "number" },
+                  endLine: { type: "number" },
+                  startAnchor: { type: "string" },
+                  endAnchor: { type: "string" },
                   createIfMissing: { type: "boolean" },
                   description: { type: "string" },
                 },
@@ -255,12 +260,23 @@ export class WorkspaceTools {
     }
   }
 
-  async validatePatch(changes: WorkspacePatchChange[]): Promise<{ valid: boolean; message: string; count: number }> {
+  async validatePatch(
+    changes: WorkspacePatchChange[],
+  ): Promise<{ valid: boolean; message: string; count: number; preview?: string }> {
+    this.beginPatchDiagnostics("패치 검증");
     try {
       const prepared = await this.preparePatch({ changes });
-      return { valid: true, message: `검증 완료: ${prepared.labels}`, count: prepared.count };
+      this.appendPatchDiagnostic(`검증 성공: ${prepared.labels}`);
+      return {
+        valid: true,
+        message: `검증 완료: ${prepared.labels}`,
+        count: prepared.count,
+        preview: renderPatchPreview(prepared),
+      };
     } catch (error) {
-      return { valid: false, message: errorMessage(error), count: 0 };
+      const message = errorMessage(error);
+      this.appendPatchDiagnostic(`검증 실패: ${message}`);
+      return { valid: false, message, count: 0 };
     }
   }
 
@@ -393,6 +409,7 @@ export class WorkspaceTools {
 
     for (const [relativePath, fileChanges] of grouped) {
       const uri = this.resolveWorkspacePath(relativePath);
+      this.appendPatchDiagnostic(`검증 경로: ${relativePath} -> ${uri.scheme === "file" ? uri.fsPath : uri.toString(true)}`);
       const state = await readTextFileState(uri);
       const current = state.text;
       const exists = state.exists;
@@ -402,7 +419,29 @@ export class WorkspaceTools {
 
       let after = current;
       const descriptions: string[] = [];
-      for (const change of fileChanges) {
+      const lineRangeChanges = fileChanges.filter(isLineRangeChange);
+      if (lineRangeChanges.length > 0) {
+        if (lineRangeChanges.length !== fileChanges.length) {
+          throw new Error(`${relativePath}에서 줄 범위 변경과 다른 패치 형식을 함께 사용할 수 없습니다.`);
+        }
+        if (!exists) {
+          throw new Error(`${relativePath} 파일이 없습니다.`);
+        }
+        const expectedHashes = new Set(lineRangeChanges.map((change) => change.expectedFileHash).filter(Boolean));
+        if (expectedHashes.size > 1) {
+          throw new Error(`${relativePath}의 줄 범위 변경에 서로 다른 파일 기준 해시가 포함되어 있습니다.`);
+        }
+        const expectedHash = [...expectedHashes][0];
+        if (expectedHash && expectedHash !== hashText(current)) {
+          throw new Error(`${relativePath} 파일이 패치 검증 이후 변경되었습니다. 변경안을 다시 생성하세요.`);
+        }
+        for (const change of lineRangeChanges) {
+          if (change.description?.trim()) {
+            descriptions.push(change.description.trim());
+          }
+        }
+        after = applyLineRangeChanges(current, state.eol, lineRangeChanges);
+      } else for (const change of fileChanges) {
         if (change.description?.trim()) {
           descriptions.push(change.description.trim());
         }
@@ -422,16 +461,18 @@ export class WorkspaceTools {
           if (!exists) {
             throw new Error(`${relativePath} 파일이 없습니다.`);
           }
-          const original = findOriginalText(after, change.originalText, state.eol);
-          if (original === undefined) {
+          const match = findOriginalTextMatch(after, change.originalText, state.eol);
+          if (!match) {
             throw new Error(`${relativePath}에서 originalText를 찾지 못했습니다.`);
           }
-          const occurrences = countOccurrences(after, original);
-          if (occurrences !== 1) {
-            throw new Error(`${relativePath}에서 originalText가 ${occurrences}곳에 발견됐습니다. 한 곳만 식별되도록 더 넓은 원문이 필요합니다.`);
+          if (match.occurrences !== 1) {
+            throw new Error(`${relativePath}에서 originalText가 ${match.occurrences}곳에 발견됐습니다. 한 곳만 식별되도록 더 넓은 원문이 필요합니다.`);
+          }
+          if (match.method === "whitespace-normalized") {
+            this.appendPatchDiagnostic(`${relativePath}: 공백 정규화 후 originalText 위치를 한 곳으로 확인했습니다.`);
           }
           const replacement = adaptLineEndings(change.replacementText, state.eol);
-          after = after.replace(original, replacement);
+          after = after.replace(match.text, replacement);
           continue;
         }
 
@@ -588,9 +629,9 @@ export class WorkspaceTools {
     return vscode.Uri.joinPath(matchedFolder.uri, ...relative.split("/").filter(Boolean));
   }
 
-  private beginPatchDiagnostics(): void {
+  private beginPatchDiagnostics(phase = "패치 적용"): void {
     this.lastOutcome = undefined;
-    this.lastDiagnostics = [`[패치 진단 ${new Date().toISOString()}]`];
+    this.lastDiagnostics = [`[패치 진단 ${new Date().toISOString()}]`, `단계: ${phase}`];
     const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString(true)).join(", ");
     this.appendPatchDiagnostic(`열린 워크스페이스: ${roots || "없음"}`);
     this.appendPatchDiagnostic(`활성 스코프: ${this.activeScope ?? "전체 워크스페이스"}`);
@@ -700,33 +741,71 @@ function documentLineEnding(document: vscode.TextDocument): string {
   return document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
 }
 
-function findOriginalText(current: string, originalText: string, eol: string): string | undefined {
-  if (!originalText) {
-    return undefined;
-  }
-  if (current.includes(originalText)) {
-    return originalText;
-  }
-  const eolAdjusted = adaptLineEndings(originalText, eol);
-  return current.includes(eolAdjusted) ? eolAdjusted : undefined;
-}
-
-function countOccurrences(content: string, needle: string): number {
-  let count = 0;
-  let offset = 0;
-  while (offset <= content.length - needle.length) {
-    const index = content.indexOf(needle, offset);
-    if (index === -1) {
-      break;
-    }
-    count++;
-    offset = index + needle.length;
-  }
-  return count;
-}
-
 function adaptLineEndings(text: string, eol: string): string {
   return text.replace(/\r\n|\r|\n/g, eol);
+}
+
+function renderPatchPreview(prepared: PreparedPatch, maxChars = 16000): string {
+  const sections: string[] = [];
+  for (const target of prepared.targets) {
+    const snapshot = prepared.snapshots.find((candidate) => candidate.path === target.path);
+    if (!snapshot) {
+      continue;
+    }
+    const beforeLines = splitPreviewLines(snapshot.before);
+    const afterLines = splitPreviewLines(snapshot.after);
+    let prefix = 0;
+    while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) {
+      prefix++;
+    }
+    let suffix = 0;
+    while (
+      suffix < beforeLines.length - prefix &&
+      suffix < afterLines.length - prefix &&
+      beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+    ) {
+      suffix++;
+    }
+    const beforeChanged = beforeLines.slice(prefix, beforeLines.length - suffix);
+    const afterChanged = afterLines.slice(prefix, afterLines.length - suffix);
+    const beforeEnd = Math.max(prefix + 1, prefix + beforeChanged.length);
+    const afterEnd = Math.max(prefix + 1, prefix + afterChanged.length);
+    const absolutePath = target.uri.scheme === "file" ? target.uri.fsPath : target.uri.toString(true);
+    sections.push(
+      [
+        `파일: ${target.path}`,
+        `실제 경로: ${absolutePath}`,
+        `변경 전 줄: ${prefix + 1}-${beforeEnd}`,
+        ...previewLines(beforeChanged, "-"),
+        `변경 후 줄: ${prefix + 1}-${afterEnd}`,
+        ...previewLines(afterChanged, "+"),
+      ].join("\n"),
+    );
+    if (sections.join("\n\n").length >= maxChars) {
+      break;
+    }
+  }
+  const preview = sections.join("\n\n");
+  return preview.length > maxChars ? `${preview.slice(0, maxChars)}\n[미리보기 생략]` : preview;
+}
+
+function splitPreviewLines(content: string): string[] {
+  const lines = content.split(/\r\n|\r|\n/);
+  if (lines.length > 1 && lines.at(-1) === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+function previewLines(lines: string[], prefix: string, maxLines = 60): string[] {
+  if (lines.length === 0) {
+    return [`${prefix} [없음]`];
+  }
+  const visible = lines.slice(0, maxLines).map((line) => `${prefix} ${line}`);
+  if (lines.length > maxLines) {
+    visible.push(`${prefix} [... ${lines.length - maxLines}개 줄 생략]`);
+  }
+  return visible;
 }
 
 export function formatPatchApplyOutcome(outcome: PatchApplyOutcome): string {
@@ -756,6 +835,10 @@ function errorMessage(error: unknown): string {
 
 function hashBytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+}
+
+function hashText(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

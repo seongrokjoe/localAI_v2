@@ -109,6 +109,11 @@ export interface WorkspacePatchChange {
   fullContent?: string;
   originalText?: string;
   replacementText?: string;
+  startLine?: number;
+  endLine?: number;
+  startAnchor?: string;
+  endAnchor?: string;
+  expectedFileHash?: string;
   createIfMissing?: boolean;
   description?: string;
 }
@@ -117,6 +122,7 @@ export interface PreparedAssistantPatch {
   message: string;
   targetPaths: string[];
   changes: WorkspacePatchChange[];
+  preview: string;
 }
 
 export interface PatchPreparationOutcome {

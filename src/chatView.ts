@@ -331,7 +331,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingChangeApproval = true;
         this.view?.webview.postMessage({
           type: "changeActions",
-          text: `실제 파일 원문과 검증한 패치가 준비되었습니다. 대상: ${preparedPatch.targetPaths.join(", ")}. 적용하시겠습니까?`,
+          text: [
+            `실제 파일 원문과 검증한 패치가 준비되었습니다. 대상: ${preparedPatch.targetPaths.join(", ")}`,
+            preparedPatch.preview,
+            "이 변경을 실제 파일에 적용하시겠습니까?",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
         });
         this.view?.webview.postMessage({ type: "status", text: "패치 승인 대기" });
       } else {
@@ -605,12 +611,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ type: 'send', text });
     }
 
-    function appendMessage(kind, text) {
+    function appendMessage(kind, text, followOverride) {
+      const shouldFollow = followOverride ?? isNearMessagesBottom();
       const element = document.createElement('div');
       element.className = 'message ' + kind;
       element.textContent = text;
       messages.appendChild(element);
-      messages.scrollTop = messages.scrollHeight;
+      scrollMessagesToBottom(shouldFollow);
       return element;
     }
 
@@ -624,9 +631,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     function finishAssistant() {
       stopTimer();
       if (currentAssistant) {
+        const shouldFollow = isNearMessagesBottom();
         currentAssistant.classList.remove('working');
         currentAssistant.textContent = assistantBuffer.trimEnd() || '완료되었습니다.';
-        messages.scrollTop = messages.scrollHeight;
+        scrollMessagesToBottom(shouldFollow);
       }
       currentAssistant = undefined;
       assistantBuffer = '';
@@ -661,7 +669,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const text = activePhase + ' ' + elapsed;
       status.textContent = text;
       if (currentAssistant) {
+        const shouldFollow = isNearMessagesBottom();
         currentAssistant.textContent = text;
+        scrollMessagesToBottom(shouldFollow);
+      }
+    }
+
+    function isNearMessagesBottom() {
+      return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 24;
+    }
+
+    function scrollMessagesToBottom(shouldFollow) {
+      if (shouldFollow) {
         messages.scrollTop = messages.scrollHeight;
       }
     }
@@ -681,8 +700,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     function renderChangeActions(text) {
+      const shouldFollow = isNearMessagesBottom();
       clearChangeActions();
-      activeChangeQuestion = appendMessage('assistant', text || '위 변경안을 실제 파일에 적용하시겠습니까?');
+      activeChangeQuestion = appendMessage('assistant', text || '위 변경안을 실제 파일에 적용하시겠습니까?', shouldFollow);
       const actions = document.createElement('div');
       actions.className = 'plan-actions';
       const apply = actionButton('예, 파일에 적용', () => {
@@ -696,7 +716,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       actions.append(apply, discard);
       messages.appendChild(actions);
       activeChangeActions = actions;
-      messages.scrollTop = messages.scrollHeight;
+      scrollMessagesToBottom(shouldFollow);
     }
 
     function clearChangeActions() {
@@ -711,6 +731,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     function renderPlanActions(planText) {
+      const shouldFollow = isNearMessagesBottom();
       lastPlan = planText;
       const actions = document.createElement('div');
       actions.className = 'plan-actions';
@@ -727,7 +748,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const clear = actionButton('컨텍스트 비우기', () => vscode.postMessage({ type: 'clearContext' }));
       actions.append(implement, refine, discard, remember, clear);
       messages.appendChild(actions);
-      messages.scrollTop = messages.scrollHeight;
+      scrollMessagesToBottom(shouldFollow);
     }
 
     function actionButton(label, handler) {

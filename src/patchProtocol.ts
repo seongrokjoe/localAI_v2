@@ -104,6 +104,29 @@ function normalizePatchChange(raw: unknown, expectedPath?: string): { change?: W
   );
   const fullContent = stringValue(value.fullContent, value.newContent, value.updatedContent, value.content);
   const description = stringValue(value.description, value.summary);
+  const startLine = integerValue(value.startLine, value.lineStart, value.fromLine);
+  const endLine = integerValue(value.endLine, value.lineEnd, value.toLine);
+  const startAnchor = stringValue(value.startAnchor, value.firstLine, value.beforeAnchor);
+  const endAnchor = stringValue(value.endAnchor, value.lastLine, value.afterAnchor);
+
+  const hasRangeField = startLine !== undefined || endLine !== undefined || startAnchor !== undefined || endAnchor !== undefined;
+  if (hasRangeField) {
+    if (startLine === undefined || endLine === undefined) {
+      return { error: "줄 범위 변경에는 startLine과 endLine이 모두 필요합니다." };
+    }
+    if (startLine < 1 || endLine < startLine) {
+      return { error: "줄 범위는 1부터 시작하며 endLine은 startLine보다 작을 수 없습니다." };
+    }
+    if (!startAnchor?.trim() || !endAnchor?.trim()) {
+      return { error: "줄 범위 변경에는 비어 있지 않은 startAnchor와 endAnchor가 필요합니다." };
+    }
+    if (replacementText === undefined) {
+      return { error: "줄 범위 변경에는 replacementText가 필요합니다." };
+    }
+    return {
+      change: { path, startLine, endLine, startAnchor, endAnchor, replacementText, description },
+    };
+  }
 
   if (originalText !== undefined && replacementText !== undefined) {
     return { change: { path, originalText, replacementText, description } };
@@ -160,4 +183,16 @@ function parseJsonObject(content: string): { value?: Record<string, unknown>; er
 
 function stringValue(...values: unknown[]): string | undefined {
   return values.find((value): value is string => typeof value === "string");
+}
+
+function integerValue(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isInteger(value)) {
+      return value;
+    }
+    if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+      return Number(value);
+    }
+  }
+  return undefined;
 }

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createHash } from "node:crypto";
 import {
   AgentMode,
   AgentRunOptions,
@@ -17,6 +18,7 @@ import { LlmClient } from "./llmClient";
 import { readSummaryForContext } from "./projectInit";
 import { formatPatchApplyOutcome, WorkspaceTools } from "./tools";
 import { parsePatchResponse, parseTargetResponse } from "./patchProtocol";
+import { isLineRangeChange } from "./patchText";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -166,6 +168,7 @@ export class CodeAgent {
       message: messages.filter(Boolean).join("; ") || `${targetPaths.length}개 파일의 변경안을 검증했습니다.`,
       targetPaths,
       changes: allChanges,
+      preview: combinedValidation.preview ?? targetPaths.join("\n"),
     };
     this.output.appendLine(`[패치 준비] 검증 완료: ${targetPaths.join(", ")} / 변경 ${allChanges.length}개`);
     return { status: "ready", message: patch.message, patch };
@@ -290,7 +293,12 @@ export class CodeAgent {
             "반드시 { \"message\": string, \"changes\": array } JSON 객체만 반환하세요.",
             `모든 changes.path는 반드시 정확히 '${targetPath}'이어야 합니다.`,
             exists
-              ? "기존 파일에는 originalText와 replacementText만 사용하세요. originalText는 제공된 현재 파일 원문에서 공백과 줄바꿈까지 정확히 복사하세요."
+              ? [
+                  "기존 파일에는 startLine, endLine, startAnchor, endAnchor, replacementText를 사용하세요.",
+                  "startLine과 endLine은 제공된 줄 번호 기준의 1부터 시작하는 포함 범위입니다.",
+                  "startAnchor와 endAnchor에는 각 경계 줄에서 줄 번호를 제외한 실제 텍스트를 복사하세요.",
+                  "빈 줄을 범위 경계로 선택하지 말고, 기존 originalText 형식은 사용하지 마세요.",
+                ].join(" ")
               : "새 파일에는 fullContent와 createIfMissing: true를 사용하세요.",
             "설명만 반환하지 말고 실제 변경이 필요하면 changes를 비우지 마세요.",
             "서로 떨어진 여러 부분을 수정할 때는 changes에 여러 항목을 넣어도 됩니다.",
@@ -305,7 +313,7 @@ export class CodeAgent {
             "모델이 설명한 구현 내용:",
             truncateToTokens(assistantResponse, 40000),
             `현재 파일 경로: ${targetPath}`,
-            "현재 파일 원문 또는 정확한 원문 구간:",
+            "줄 번호가 표시된 현재 파일 원문 또는 정확한 원문 구간:",
             fileContext,
             feedback ? `이전 시도 검증 오류:\n${truncateToTokens(feedback, 8000)}` : "",
           ]
@@ -323,8 +331,15 @@ export class CodeAgent {
           return false;
         }
         if (exists && typeof change.fullContent === "string") {
-          issues.push("기존 파일에 fullContent가 반환됐습니다. originalText/replacementText가 필요합니다.");
+          issues.push("기존 파일에 fullContent가 반환됐습니다. 줄 범위 패치가 필요합니다.");
           return false;
+        }
+        if (exists && !isLineRangeChange(change)) {
+          issues.push("기존 파일에는 startLine/endLine과 startAnchor/endAnchor를 사용하는 줄 범위 패치가 필요합니다.");
+          return false;
+        }
+        if (exists && isLineRangeChange(change)) {
+          change.expectedFileHash = hashText(current);
         }
         if (!exists && typeof change.fullContent === "string") {
           change.createIfMissing = true;
@@ -568,8 +583,8 @@ function looksLikeRelativeFile(value: string): boolean {
 }
 
 function buildPatchFileContext(content: string, query: string, maxChars: number): string {
-  if (content.length <= maxChars) {
-    return content;
+  if (content.length <= Math.floor(maxChars * 0.72)) {
+    return formatNumberedRanges(content, [{ start: 0, end: content.length }], maxChars);
   }
 
   const lower = content.toLowerCase();
@@ -591,8 +606,15 @@ function buildPatchFileContext(content: string, query: string, maxChars: number)
   }
 
   if (ranges.length === 0) {
-    const half = Math.floor(maxChars / 2);
-    return [`[파일 앞부분 0-${half}]`, content.slice(0, half), `[파일 뒷부분 ${content.length - half}-${content.length}]`, content.slice(-half)].join("\n");
+    const excerptSize = Math.floor(maxChars * 0.35);
+    return formatNumberedRanges(
+      content,
+      [
+        { start: 0, end: excerptSize },
+        { start: Math.max(0, content.length - excerptSize), end: content.length },
+      ],
+      maxChars,
+    );
   }
 
   ranges.sort((left, right) => left.start - right.start);
@@ -606,15 +628,51 @@ function buildPatchFileContext(content: string, query: string, maxChars: number)
     }
   }
 
+  return formatNumberedRanges(content, merged, maxChars);
+}
+
+function formatNumberedRanges(content: string, ranges: Array<{ start: number; end: number }>, maxChars: number): string {
   const sections: string[] = [];
   let used = 0;
-  for (const range of merged) {
+  for (const range of ranges) {
+    const start = range.start <= 0 ? 0 : content.lastIndexOf("\n", range.start - 1) + 1;
+    const nextLine = content.indexOf("\n", range.end);
+    const end = nextLine === -1 ? content.length : nextLine + 1;
+    const firstLine = lineNumberAtOffset(content, start);
+    const rawLines = content.slice(start, end).split("\n");
+    const numbered: string[] = [];
+    for (let index = 0; index < rawLines.length; index++) {
+      const line = rawLines[index].replace(/\r$/, "");
+      const formatted = `${firstLine + index}|${line}`;
+      if (used + formatted.length + 1 > maxChars) {
+        break;
+      }
+      numbered.push(formatted);
+      used += formatted.length + 1;
+    }
+    if (numbered.length > 0) {
+      const lastLine = firstLine + numbered.length - 1;
+      const header = `[줄 번호 포함 원문 ${firstLine}-${lastLine}]`;
+      sections.push(`${header}\n${numbered.join("\n")}`);
+      used += header.length + 2;
+    }
     if (used >= maxChars) {
       break;
     }
-    const excerpt = content.slice(range.start, Math.min(range.end, range.start + (maxChars - used)));
-    sections.push(`[정확한 원문 구간 ${range.start}-${range.start + excerpt.length}]\n${excerpt}`);
-    used += excerpt.length;
   }
   return sections.join("\n\n");
+}
+
+function lineNumberAtOffset(content: string, offset: number): number {
+  let line = 1;
+  for (let index = 0; index < offset; index++) {
+    if (content.charCodeAt(index) === 10) {
+      line++;
+    }
+  }
+  return line;
+}
+
+function hashText(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }
