@@ -352,7 +352,7 @@ export class WorkspaceTools {
     if (!normalized) {
       return glob;
     }
-    if (normalized.endsWith(".sln") || normalized.endsWith(".csproj")) {
+    if (isProjectOrSolutionPath(normalized)) {
       const slash = normalized.lastIndexOf("/");
       const folder = slash === -1 ? "" : normalized.slice(0, slash);
       return folder ? `${folder}/${glob}` : glob;
@@ -382,6 +382,10 @@ function parseArgs(rawArgs: string): Record<string, unknown> {
 
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function isProjectOrSolutionPath(normalizedPath: string): boolean {
+  return /\.(slnx?|csproj|vcxproj|vbproj|fsproj|sqlproj|wixproj|proj)$/i.test(normalizedPath);
 }
 
 function replaceWholeDocument(edit: vscode.WorkspaceEdit, uri: vscode.Uri, current: string, next: string): void {
