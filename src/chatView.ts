@@ -2,11 +2,15 @@ import * as vscode from "vscode";
 import { CodeAgent } from "./agent";
 import { readRuntimeConfig, secretTokenKey, updateSetting } from "./config";
 import { ContextManager } from "./context";
+import { ModeManager } from "./modeManager";
+import { SessionStore } from "./sessionStore";
+import { AgentMode } from "./types";
 
 interface WebviewMessage {
   type: string;
   text?: string;
   id?: string;
+  mode?: AgentMode;
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -17,9 +21,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly extensionUri: vscode.Uri,
     private readonly secrets: vscode.SecretStorage,
     private readonly contextManager: ContextManager,
+    private readonly modeManager: ModeManager,
+    private readonly sessionStore: SessionStore,
     private readonly agent: CodeAgent,
   ) {
     this.contextManager.onDidChange(() => this.postContext());
+    this.modeManager.onDidChange(() => this.postState());
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -31,6 +38,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.html(webviewView.webview);
     webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => this.handleMessage(message));
     this.postContext();
+    this.postState();
   }
 
   async reveal(): Promise<void> {
@@ -44,16 +52,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  postState(): void {
+    this.view?.webview.postMessage({
+      type: "state",
+      mode: this.modeManager.current,
+      activeScope: this.sessionStore.activeScope,
+    });
+  }
+
   async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case "send":
         await this.send(message.text ?? "");
         break;
+      case "setMode":
+        if (message.mode) {
+          await this.modeManager.set(message.mode);
+          this.postState();
+        }
+        break;
       case "stop":
         this.abortController?.abort();
         break;
       case "clearContext":
-        this.contextManager.clear();
+        await this.clearContextMenu();
         break;
       case "removeContext":
         if (message.id) {
@@ -69,7 +91,65 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "addCurrentFile":
         await vscode.commands.executeCommand("companyCodeAI.addCurrentFileToChat");
         break;
+      case "implementPlan":
+        await this.implementPlan(message.text ?? "");
+        break;
+      case "refinePlan":
+        this.view?.webview.postMessage({ type: "setInput", text: `Refine this plan:\n\n${message.text ?? ""}` });
+        break;
+      case "remember":
+        await this.sessionStore.remember(message.text ?? "");
+        vscode.window.showInformationMessage("Company Code AI remembered the selected content.");
+        break;
     }
+  }
+
+  async clearContextMenu(): Promise<void> {
+    const choice = await vscode.window.showQuickPick(
+      [
+        { label: "Clear Added Context", description: "Remove added files and selections only." },
+        { label: "Clear Chat Session", description: "Clear recent turns and session summary." },
+        { label: "Clear Project Memory", description: "Clear persisted project memory." },
+        { label: "Clear All", description: "Clear added context, chat session, and project memory." },
+      ],
+      { title: "Company Code AI: Clear Context" },
+    );
+    if (!choice) {
+      return;
+    }
+    if (choice.label === "Clear Added Context") {
+      this.contextManager.clear();
+    } else if (choice.label === "Clear Chat Session") {
+      await this.sessionStore.clearAddedSession();
+    } else if (choice.label === "Clear Project Memory") {
+      await this.sessionStore.clearProjectMemory();
+    } else {
+      this.contextManager.clear();
+      await this.sessionStore.clearAll();
+    }
+    this.postContext();
+    this.postState();
+  }
+
+  async reviewLastAIChange(): Promise<void> {
+    const changeSet = await this.sessionStore.getLastChangeSet();
+    if (!changeSet) {
+      vscode.window.showWarningMessage("No AI-applied change snapshot is available.");
+      return;
+    }
+    this.contextManager.addNote(`AI change ${changeSet.id}`, this.sessionStore.renderChangeSetDiff(changeSet));
+    await this.modeManager.set("plan");
+    await this.reveal();
+    await this.send("Review the last AI-applied change. Focus on regressions, missed edge cases, and whether the implementation matches the requested plan.");
+  }
+
+  private async implementPlan(plan: string): Promise<void> {
+    const trimmed = plan.trim();
+    if (!trimmed) {
+      return;
+    }
+    await this.modeManager.set("implement");
+    await this.send(`Implement this approved plan. Keep edits minimal and ask for file-change approval before applying patches.\n\n${trimmed}`);
   }
 
   private async send(text: string): Promise<void> {
@@ -89,14 +169,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.abortController = new AbortController();
     try {
       const config = await readRuntimeConfig(this.secrets);
-      await this.agent.run(
+      await this.sessionStore.recordTurn("user", prompt);
+      const response = await this.agent.run(
         prompt,
         this.contextManager.list(),
         config,
+        {
+          mode: this.modeManager.current,
+          memory: this.sessionStore.memoryContext(),
+        },
         (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
         this.abortController.signal,
       );
+      await this.sessionStore.recordTurn("assistant", response);
       this.view?.webview.postMessage({ type: "assistantDone" });
+      if (this.modeManager.current === "plan" && response.trim()) {
+        this.view?.webview.postMessage({ type: "planActions", text: response });
+      }
       this.view?.webview.postMessage({ type: "status", text: "Ready" });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
@@ -133,6 +222,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       align-items: center;
       padding: 8px;
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    .modebar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 8px;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    .modebar button.active {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
     }
     button {
       border: 1px solid var(--vscode-button-border, transparent);
@@ -205,6 +305,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       border-color: var(--vscode-errorForeground);
       color: var(--vscode-errorForeground);
     }
+    .plan-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: -6px 0 12px;
+      padding: 0 2px;
+    }
     .composer {
       position: fixed;
       left: 0;
@@ -243,6 +350,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <button id="clearContext">Clear</button>
     <span id="status">Ready</span>
   </div>
+  <div class="modebar">
+    <button id="planMode">Plan</button>
+    <button id="implementMode">Implement</button>
+  </div>
   <div id="context"></div>
   <div id="messages"></div>
   <div class="composer">
@@ -258,7 +369,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const input = document.getElementById('input');
     const context = document.getElementById('context');
     const status = document.getElementById('status');
+    const planMode = document.getElementById('planMode');
+    const implementMode = document.getElementById('implementMode');
     let currentAssistant;
+    let lastPlan = '';
 
     document.getElementById('send').addEventListener('click', send);
     document.getElementById('stop').addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
@@ -266,6 +380,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     document.getElementById('token').addEventListener('click', () => vscode.postMessage({ type: 'setToken' }));
     document.getElementById('addFile').addEventListener('click', () => vscode.postMessage({ type: 'addCurrentFile' }));
     document.getElementById('clearContext').addEventListener('click', () => vscode.postMessage({ type: 'clearContext' }));
+    planMode.addEventListener('click', () => vscode.postMessage({ type: 'setMode', mode: 'plan' }));
+    implementMode.addEventListener('click', () => vscode.postMessage({ type: 'setMode', mode: 'implement' }));
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
@@ -276,6 +392,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     window.addEventListener('message', (event) => {
       const message = event.data;
       if (message.type === 'context') renderContext(message.items ?? []);
+      if (message.type === 'state') renderState(message);
+      if (message.type === 'setInput') input.value = message.text ?? '';
       if (message.type === 'status') status.textContent = message.text;
       if (message.type === 'user') appendMessage('user', message.text);
       if (message.type === 'assistantStart') currentAssistant = appendMessage('assistant', '');
@@ -284,6 +402,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         messages.scrollTop = messages.scrollHeight;
       }
       if (message.type === 'assistantDone') currentAssistant = undefined;
+      if (message.type === 'planActions') renderPlanActions(message.text ?? '');
       if (message.type === 'assistantError') {
         if (currentAssistant) currentAssistant.remove();
         currentAssistant = undefined;
@@ -305,6 +424,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       messages.appendChild(element);
       messages.scrollTop = messages.scrollHeight;
       return element;
+    }
+
+    function renderState(state) {
+      planMode.classList.toggle('active', state.mode === 'plan');
+      implementMode.classList.toggle('active', state.mode === 'implement');
+      const scope = state.activeScope ? ' · ' + state.activeScope : '';
+      status.textContent = (state.mode === 'implement' ? 'Implement' : 'Plan') + scope;
+    }
+
+    function renderPlanActions(planText) {
+      lastPlan = planText;
+      const actions = document.createElement('div');
+      actions.className = 'plan-actions';
+      const implement = actionButton('Implement Plan', () => vscode.postMessage({ type: 'implementPlan', text: lastPlan }));
+      const refine = actionButton('Refine Plan', () => vscode.postMessage({ type: 'refinePlan', text: lastPlan }));
+      const discard = actionButton('Discard', () => actions.remove());
+      const remember = actionButton('Remember', () => vscode.postMessage({ type: 'remember', text: lastPlan }));
+      const clear = actionButton('Clear Context', () => vscode.postMessage({ type: 'clearContext' }));
+      actions.append(implement, refine, discard, remember, clear);
+      messages.appendChild(actions);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function actionButton(label, handler) {
+      const button = document.createElement('button');
+      button.textContent = label;
+      button.addEventListener('click', handler);
+      return button;
     }
 
     function renderContext(items) {

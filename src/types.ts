@@ -1,4 +1,6 @@
 export type ToolCallMode = "auto" | "native" | "json" | "disabled";
+export type AgentMode = "plan" | "implement";
+export type ChatRole = "user" | "assistant";
 
 export interface ExtensionSettings {
   serverUrl: string;
@@ -54,4 +56,34 @@ export interface CompletionResult {
   content: string;
   toolCalls: ChatToolCall[];
   usage?: Record<string, unknown>;
+}
+
+export interface AgentMemoryContext {
+  activeScope?: string;
+  projectMemory: string;
+  sessionSummary: string;
+  recentTurns: Array<{
+    role: ChatRole;
+    content: string;
+    createdAt: number;
+  }>;
+}
+
+export interface AgentRunOptions {
+  mode: AgentMode;
+  memory: AgentMemoryContext;
+}
+
+export interface FileSnapshotChange {
+  path: string;
+  before: string;
+  after: string;
+  description?: string;
+}
+
+export interface ChangeSet {
+  id: string;
+  createdAt: number;
+  mode: AgentMode;
+  changes: FileSnapshotChange[];
 }

@@ -2,13 +2,25 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { ChatToolDefinition } from "./types";
+import { AgentMode, ChatToolDefinition, FileSnapshotChange } from "./types";
 import { assertSafePathSegment } from "./security";
 
 const excludeGlob = "**/{.git,node_modules,dist,out,build,.company-code-ai,.vscode-test}/**";
 
 export class WorkspaceTools {
-  readonly definitions: ChatToolDefinition[] = [
+  private activeScope?: string;
+
+  constructor(private readonly onChangeSet?: (mode: AgentMode, changes: FileSnapshotChange[]) => Promise<void>) {}
+
+  setActiveScope(scope: string | undefined): void {
+    this.activeScope = scope;
+  }
+
+  definitionsForMode(mode: AgentMode): ChatToolDefinition[] {
+    return mode === "plan" ? this.definitions.filter((tool) => tool.function.name !== "applyPatchAfterUserApproval") : this.definitions;
+  }
+
+  private readonly definitions: ChatToolDefinition[] = [
     {
       type: "function",
       function: {
@@ -129,7 +141,10 @@ export class WorkspaceTools {
     },
   ];
 
-  async executeTool(name: string, rawArgs: string): Promise<string> {
+  async executeTool(name: string, rawArgs: string, mode: AgentMode): Promise<string> {
+    if (mode === "plan" && name === "applyPatchAfterUserApproval") {
+      throw new Error("PlanMode does not allow file edits. Switch to ImplementMode after approving a plan.");
+    }
     const args = parseArgs(rawArgs);
     switch (name) {
       case "listFiles":
@@ -143,14 +158,15 @@ export class WorkspaceTools {
       case "proposePatch":
         return JSON.stringify(args);
       case "applyPatchAfterUserApproval":
-        return await this.applyPatchAfterUserApproval(args);
+        return await this.applyPatchAfterUserApproval(args, mode);
       default:
         throw new Error(`Unknown tool '${name}'.`);
     }
   }
 
   async listFiles(glob = "**/*", maxResults = 200): Promise<string[]> {
-    const files = await vscode.workspace.findFiles(glob, excludeGlob, maxResults);
+    const scopedGlob = this.applyActiveScope(glob);
+    const files = await vscode.workspace.findFiles(scopedGlob, excludeGlob, maxResults);
     return files.map((uri) => vscode.workspace.asRelativePath(uri, false)).sort();
   }
 
@@ -241,7 +257,7 @@ export class WorkspaceTools {
     });
   }
 
-  async applyPatchAfterUserApproval(rawArgs: unknown): Promise<string> {
+  async applyPatchAfterUserApproval(rawArgs: unknown, mode: AgentMode): Promise<string> {
     const args = rawArgs as {
       changes?: Array<{
         path?: string;
@@ -268,6 +284,7 @@ export class WorkspaceTools {
     }
 
     const edit = new vscode.WorkspaceEdit();
+    const snapshots: FileSnapshotChange[] = [];
     for (const change of changes) {
       const relativePath = String(change.path ?? "");
       const uri = this.resolveWorkspacePath(relativePath);
@@ -283,7 +300,9 @@ export class WorkspaceTools {
         if (!exists && !change.createIfMissing) {
           throw new Error(`${relativePath} does not exist. Set createIfMissing to true to create it.`);
         }
-        replaceWholeDocument(edit, uri, exists ? current : "", change.fullContent);
+        const after = change.fullContent;
+        replaceWholeDocument(edit, uri, exists ? current : "", after);
+        snapshots.push({ path: relativePath, before: exists ? current : "", after, description: change.description });
         continue;
       }
 
@@ -296,6 +315,7 @@ export class WorkspaceTools {
         }
         const next = current.replace(change.originalText, change.replacementText);
         replaceWholeDocument(edit, uri, current, next);
+        snapshots.push({ path: relativePath, before: current, after: next, description: change.description });
         continue;
       }
 
@@ -303,6 +323,9 @@ export class WorkspaceTools {
     }
 
     const ok = await vscode.workspace.applyEdit(edit);
+    if (ok && snapshots.length > 0) {
+      await this.onChangeSet?.(mode, snapshots);
+    }
     return ok ? "Patch applied." : "VS Code rejected the workspace edit.";
   }
 
@@ -315,6 +338,22 @@ export class WorkspaceTools {
       throw new Error(`Path is outside the workspace: ${input}`);
     }
     return vscode.Uri.file(fsPath);
+  }
+
+  private applyActiveScope(glob: string): string {
+    if (!this.activeScope) {
+      return glob;
+    }
+    const normalized = this.activeScope.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (!normalized) {
+      return glob;
+    }
+    if (normalized.endsWith(".sln") || normalized.endsWith(".csproj")) {
+      const slash = normalized.lastIndexOf("/");
+      const folder = slash === -1 ? "" : normalized.slice(0, slash);
+      return folder ? `${folder}/${glob}` : glob;
+    }
+    return `${normalized}/${glob}`;
   }
 }
 

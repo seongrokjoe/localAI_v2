@@ -43,6 +43,25 @@ After installation, configure:
 
 If the server requires a bearer token, run `Company Code AI: Set Auth Token` from the command palette.
 
+## Codex-style workflow
+
+Open the Git repository or solution root in VS Code, then narrow context with `Company Code AI: Set Active Scope` when the repository contains many projects.
+
+Modes:
+
+- `PlanMode`: review, explain, and plan only. File edits are disabled.
+- `ImplementMode`: implementation is allowed, but file edits still require an explicit VS Code approval prompt.
+
+Default shortcuts:
+
+- `Ctrl+Alt+P`: switch to PlanMode
+- `Ctrl+Alt+I`: switch to ImplementMode
+- `Ctrl+Alt+L`: clear context
+
+PlanMode responses include actions for implementing, refining, discarding, remembering, or clearing context. The extension stores session memory and AI-applied change snapshots under `.company-code-ai/` in the workspace.
+
+Use `Company Code AI: Review Last AI Change` to review the last AI-applied before/after snapshot without requiring remote Git access.
+
 ## Security Defaults
 
 - The server URL is validated before every request.

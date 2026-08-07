@@ -19,6 +19,13 @@
   "activationEvents": [
     "onView:companyCodeAI.chatView",
     "onCommand:companyCodeAI.openChat",
+    "onCommand:companyCodeAI.setPlanMode",
+    "onCommand:companyCodeAI.setImplementMode",
+    "onCommand:companyCodeAI.toggleMode",
+    "onCommand:companyCodeAI.clearContext",
+    "onCommand:companyCodeAI.setActiveScope",
+    "onCommand:companyCodeAI.clearActiveScope",
+    "onCommand:companyCodeAI.reviewLastAIChange",
     "onCommand:companyCodeAI.configureServer",
     "onCommand:companyCodeAI.setAuthToken",
     "onCommand:companyCodeAI.clearAuthToken",
@@ -49,6 +56,34 @@
       {
         "command": "companyCodeAI.openChat",
         "title": "Company Code AI: Open Chat"
+      },
+      {
+        "command": "companyCodeAI.setPlanMode",
+        "title": "Company Code AI: Switch to Plan Mode"
+      },
+      {
+        "command": "companyCodeAI.setImplementMode",
+        "title": "Company Code AI: Switch to Implement Mode"
+      },
+      {
+        "command": "companyCodeAI.toggleMode",
+        "title": "Company Code AI: Toggle Plan/Implement Mode"
+      },
+      {
+        "command": "companyCodeAI.clearContext",
+        "title": "Company Code AI: Clear Context"
+      },
+      {
+        "command": "companyCodeAI.setActiveScope",
+        "title": "Company Code AI: Set Active Scope"
+      },
+      {
+        "command": "companyCodeAI.clearActiveScope",
+        "title": "Company Code AI: Clear Active Scope"
+      },
+      {
+        "command": "companyCodeAI.reviewLastAIChange",
+        "title": "Company Code AI: Review Last AI Change"
       },
       {
         "command": "companyCodeAI.configureServer",
@@ -141,6 +176,23 @@
         }
       }
     },
+    "keybindings": [
+      {
+        "command": "companyCodeAI.setPlanMode",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
+      },
+      {
+        "command": "companyCodeAI.setImplementMode",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i"
+      },
+      {
+        "command": "companyCodeAI.clearContext",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l"
+      }
+    ],
     "menus": {
       "editor/context": [
         {
