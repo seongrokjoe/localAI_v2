@@ -62,10 +62,25 @@ PlanMode responses include actions for implementing, refining, discarding, remem
 
 Use `Company Code AI: Review Last AI Change` to review the last AI-applied before/after snapshot without requiring remote Git access.
 
+## Project Init Summary
+
+For a large solution, run `Company Code AI: Init Project Summary` from the command palette, click `Init` in the sidebar, or type `/init` in the chat input.
+
+The init workflow:
+
+- scans local `.sln` and project files without remote Git access
+- summarizes each project in separate internal LLM calls
+- reduces those project summaries into a repository-level `SUMMARY.md`
+- previews the generated markdown before writing it
+- stores intermediate cache files under `.company-code-ai/init/`
+
+Use `/init refresh` or `Company Code AI: Refresh Project Summary` after large structure changes. Use `/summary` or `Company Code AI: Open Project Summary` to reopen the generated file. Normal chat requests automatically include `SUMMARY.md` as reference context when it exists.
+
 ## Security Defaults
 
 - The server URL is validated before every request.
 - Auth tokens are stored in VS Code SecretStorage.
 - The extension does not execute arbitrary shell commands.
 - Prompt and source text are not written to extension logs.
+- Init cache and change snapshots are stored only inside the opened workspace under `.company-code-ai/`.
 - Safe workspace tools are limited to file listing, file reading, text search, Git diff reading, patch proposal, and user-approved patch application.

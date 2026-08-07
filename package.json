@@ -26,6 +26,10 @@
     "onCommand:companyCodeAI.setActiveScope",
     "onCommand:companyCodeAI.clearActiveScope",
     "onCommand:companyCodeAI.reviewLastAIChange",
+    "onCommand:companyCodeAI.initProjectSummary",
+    "onCommand:companyCodeAI.refreshProjectSummary",
+    "onCommand:companyCodeAI.openProjectSummary",
+    "onCommand:companyCodeAI.clearInitCache",
     "onCommand:companyCodeAI.configureServer",
     "onCommand:companyCodeAI.setAuthToken",
     "onCommand:companyCodeAI.clearAuthToken",
@@ -84,6 +88,22 @@
       {
         "command": "companyCodeAI.reviewLastAIChange",
         "title": "Company Code AI: Review Last AI Change"
+      },
+      {
+        "command": "companyCodeAI.initProjectSummary",
+        "title": "Company Code AI: Init Project Summary"
+      },
+      {
+        "command": "companyCodeAI.refreshProjectSummary",
+        "title": "Company Code AI: Refresh Project Summary"
+      },
+      {
+        "command": "companyCodeAI.openProjectSummary",
+        "title": "Company Code AI: Open Project Summary"
+      },
+      {
+        "command": "companyCodeAI.clearInitCache",
+        "title": "Company Code AI: Clear Init Cache"
       },
       {
         "command": "companyCodeAI.configureServer",

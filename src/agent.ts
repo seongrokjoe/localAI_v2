@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { AgentMode, AgentRunOptions, ContextItem, ChatMessage, RuntimeConfig, ChatToolCall } from "./types";
 import { estimateTokens, truncateToTokens } from "./context";
 import { LlmClient } from "./llmClient";
+import { readSummaryForContext } from "./projectInit";
 import { WorkspaceTools } from "./tools";
 
 const baseSystemPrompt = [
@@ -133,6 +134,7 @@ export class CodeAgent {
     };
 
     addSection("sessionMemory", renderMemory(options), 24000);
+    addSection("projectSummary", await readSummaryForContext(50000), 50000);
     addSection("workspaceFiles", (await this.safeListFiles()).join("\n"), 12000);
     addSection("gitDiff", await this.tools.getGitDiff(120000), 30000);
     addSection("explicitContext", renderContextItems(contextItems), 60000);

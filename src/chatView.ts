@@ -91,6 +91,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "addCurrentFile":
         await vscode.commands.executeCommand("companyCodeAI.addCurrentFileToChat");
         break;
+      case "initSummary":
+        await vscode.commands.executeCommand("companyCodeAI.initProjectSummary");
+        break;
       case "implementPlan":
         await this.implementPlan(message.text ?? "");
         break;
@@ -159,6 +162,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (this.abortController) {
       vscode.window.showWarningMessage("A Company Code AI request is already running.");
+      return;
+    }
+    const slash = prompt.toLowerCase();
+    if (slash === "/init" || slash === "/init refresh" || slash === "/init --refresh") {
+      await vscode.commands.executeCommand(slash.includes("refresh") ? "companyCodeAI.refreshProjectSummary" : "companyCodeAI.initProjectSummary");
+      return;
+    }
+    if (slash === "/summary") {
+      await vscode.commands.executeCommand("companyCodeAI.openProjectSummary");
       return;
     }
 
@@ -347,6 +359,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <button id="configure">Server</button>
     <button id="token">Token</button>
     <button id="addFile">File</button>
+    <button id="initSummary" title="Generate or refresh SUMMARY.md">Init</button>
     <button id="clearContext">Clear</button>
     <span id="status">Ready</span>
   </div>
@@ -379,6 +392,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     document.getElementById('configure').addEventListener('click', () => vscode.postMessage({ type: 'configure' }));
     document.getElementById('token').addEventListener('click', () => vscode.postMessage({ type: 'setToken' }));
     document.getElementById('addFile').addEventListener('click', () => vscode.postMessage({ type: 'addCurrentFile' }));
+    document.getElementById('initSummary').addEventListener('click', () => vscode.postMessage({ type: 'initSummary' }));
     document.getElementById('clearContext').addEventListener('click', () => vscode.postMessage({ type: 'clearContext' }));
     planMode.addEventListener('click', () => vscode.postMessage({ type: 'setMode', mode: 'plan' }));
     implementMode.addEventListener('click', () => vscode.postMessage({ type: 'setMode', mode: 'implement' }));
@@ -429,7 +443,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     function renderState(state) {
       planMode.classList.toggle('active', state.mode === 'plan');
       implementMode.classList.toggle('active', state.mode === 'implement');
-      const scope = state.activeScope ? ' · ' + state.activeScope : '';
+      const scope = state.activeScope ? ' - ' + state.activeScope : '';
       status.textContent = (state.mode === 'implement' ? 'Implement' : 'Plan') + scope;
     }
 

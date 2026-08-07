@@ -6,6 +6,7 @@ import { CodeAgent } from "./agent";
 import { WorkspaceTools, ensureCacheDirectory } from "./tools";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
+import { ProjectInitializer } from "./projectInit";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("Company Code AI");
@@ -18,6 +19,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   tools.setActiveScope(sessionStore.activeScope);
   const agent = new CodeAgent(tools, output);
+  const projectInitializer = new ProjectInitializer(context.secrets, output);
   const chatView = new ChatViewProvider(context.extensionUri, context.secrets, contextManager, modeManager, sessionStore, agent);
 
   await ensureCacheDirectory().catch(() => undefined);
@@ -58,6 +60,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage("Company Code AI active scope cleared.");
     }),
     vscode.commands.registerCommand("companyCodeAI.reviewLastAIChange", () => chatView.reviewLastAIChange()),
+    vscode.commands.registerCommand("companyCodeAI.initProjectSummary", async () => {
+      await modeManager.set("plan");
+      chatView.postState();
+      await projectInitializer.initProjectSummary(false);
+    }),
+    vscode.commands.registerCommand("companyCodeAI.refreshProjectSummary", async () => {
+      await modeManager.set("plan");
+      chatView.postState();
+      await projectInitializer.initProjectSummary(true);
+    }),
+    vscode.commands.registerCommand("companyCodeAI.openProjectSummary", () => projectInitializer.openProjectSummary()),
+    vscode.commands.registerCommand("companyCodeAI.clearInitCache", () => projectInitializer.clearInitCache()),
     vscode.commands.registerCommand("companyCodeAI.configureServer", () => configureServer()),
     vscode.commands.registerCommand("companyCodeAI.setAuthToken", () => setAuthToken(context.secrets)),
     vscode.commands.registerCommand("companyCodeAI.clearAuthToken", async () => {
