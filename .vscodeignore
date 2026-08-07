@@ -3,7 +3,7 @@
 node_modules/**
 src/**
 scripts/**
-*.map
+**/*.map
 tsconfig.json
 package-lock.json
 pnpm-lock.yaml

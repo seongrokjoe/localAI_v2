@@ -3,4 +3,6 @@ dist/
 .company-code-ai/
 .vscode-test/
 *.vsix
+!release/
+!release/*.vsix
 *.log

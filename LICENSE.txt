@@ -1,0 +1,5 @@
+Internal use only.
+
+Copyright (c) 2026.
+
+This project is distributed only for authorized internal use.
