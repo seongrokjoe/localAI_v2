@@ -13,6 +13,26 @@ interface TextFileState {
   eol: string;
 }
 
+interface PatchChangeInput {
+  path?: string;
+  fullContent?: string;
+  originalText?: string;
+  replacementText?: string;
+  createIfMissing?: boolean;
+  description?: string;
+}
+
+interface PatchInput {
+  changes?: PatchChangeInput[];
+}
+
+interface PreparedPatch {
+  edit: vscode.WorkspaceEdit;
+  snapshots: FileSnapshotChange[];
+  labels: string;
+  count: number;
+}
+
 export class WorkspaceTools {
   private activeScope?: string;
 
@@ -264,16 +284,26 @@ export class WorkspaceTools {
   }
 
   async applyPatchAfterUserApproval(rawArgs: unknown, mode: AgentMode): Promise<string> {
-    const args = rawArgs as {
-      changes?: Array<{
-        path?: string;
-        fullContent?: string;
-        originalText?: string;
-        replacementText?: string;
-        createIfMissing?: boolean;
-        description?: string;
-      }>;
-    };
+    assertPatchAllowed(mode);
+    const prepared = await this.preparePatch(rawArgs);
+    const approved = await vscode.window.showWarningMessage(
+      `워크스페이스 변경 ${prepared.count}개를 적용할까요? ${prepared.labels}`,
+      { modal: true },
+      "적용",
+    );
+    if (approved !== "적용") {
+      return "사용자가 패치 적용을 거부했습니다.";
+    }
+    return await this.applyPreparedPatch(prepared, mode);
+  }
+
+  async applyPatchWithPriorApproval(rawArgs: unknown, mode: AgentMode): Promise<string> {
+    assertPatchAllowed(mode);
+    return await this.applyPreparedPatch(await this.preparePatch(rawArgs), mode);
+  }
+
+  private async preparePatch(rawArgs: unknown): Promise<PreparedPatch> {
+    const args = rawArgs as PatchInput;
     const changes = args.changes ?? [];
     if (changes.length === 0) {
       throw new Error("제공된 변경이 없습니다.");
@@ -316,19 +346,18 @@ export class WorkspaceTools {
       throw new Error(`${relativePath}에는 fullContent 또는 originalText/replacementText가 필요합니다.`);
     }
 
-    const labels = changes.map((change) => change.path ?? "[missing path]").join(", ");
-    const approved = await vscode.window.showWarningMessage(
-      `워크스페이스 변경 ${changes.length}개를 적용할까요? ${labels}`,
-      { modal: true },
-      "적용",
-    );
-    if (approved !== "적용") {
-      return "사용자가 패치 적용을 거부했습니다.";
-    }
+    return {
+      edit,
+      snapshots,
+      labels: changes.map((change) => change.path ?? "[missing path]").join(", "),
+      count: changes.length,
+    };
+  }
 
-    const ok = await vscode.workspace.applyEdit(edit);
-    if (ok && snapshots.length > 0) {
-      await this.onChangeSet?.(mode, snapshots);
+  private async applyPreparedPatch(prepared: PreparedPatch, mode: AgentMode): Promise<string> {
+    const ok = await vscode.workspace.applyEdit(prepared.edit);
+    if (ok && prepared.snapshots.length > 0) {
+      await this.onChangeSet?.(mode, prepared.snapshots);
     }
     return ok ? "패치를 적용했습니다." : "VS Code가 워크스페이스 편집을 거부했습니다.";
   }
@@ -382,6 +411,12 @@ function parseArgs(rawArgs: string): Record<string, unknown> {
 
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function assertPatchAllowed(mode: AgentMode): void {
+  if (mode === "plan") {
+    throw new Error("PlanMode에서는 파일 수정이 허용되지 않습니다. 계획을 승인한 뒤 ImplementMode로 전환하세요.");
+  }
 }
 
 function isProjectOrSolutionPath(normalizedPath: string): boolean {

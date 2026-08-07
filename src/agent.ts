@@ -19,6 +19,8 @@ interface PatchProposal {
   changes?: PatchProposalChange[];
 }
 
+type PatchApprovalMode = "vscodePrompt" | "preapproved";
+
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
   "기본 답변 언어는 한국어입니다. 사용자가 명시적으로 다른 언어를 요청한 경우에만 예외로 처리하세요.",
@@ -40,7 +42,8 @@ const modePrompts: Record<AgentMode, string> = {
     "현재 모드는 ImplementMode입니다.",
     "정확한 파일 수정은 applyPatchAfterUserApproval 도구를 통해서만 제안하세요.",
     "승인된 계획 또는 사용자의 직접 요청 범위 안에서만 좁게 수정하세요.",
-    "도구 호출을 사용할 수 없으면 파일을 수정한 척하지 말고 정확한 교체 코드 조각을 제공하세요.",
+    "채팅 텍스트로 '패치를 적용하시겠습니까?', '예/아니오' 같은 승인 질문을 출력하지 마세요.",
+    "도구 호출을 사용할 수 없으면 파일을 수정한 척하지 말고 정확한 교체 코드 조각을 제공하세요. 실제 적용 여부는 확장 UI가 묻습니다.",
   ].join("\n"),
 };
 
@@ -129,6 +132,7 @@ export class CodeAgent {
     onDelta: (text: string) => void,
     onStatus?: (text: string) => void | Promise<void>,
     signal?: AbortSignal,
+    approvalMode: PatchApprovalMode = "vscodePrompt",
   ): Promise<string> {
     this.lastRunAppliedWorkspaceChange = false;
     await onStatus?.("변경안 분석 중");
@@ -151,8 +155,11 @@ export class CodeAgent {
       return message;
     }
 
-    await onStatus?.("파일 변경 승인 대기 중");
-    const result = await this.tools.applyPatchAfterUserApproval({ changes }, "implement");
+    await onStatus?.(approvalMode === "preapproved" ? "파일 변경 적용 중" : "파일 변경 승인 대기 중");
+    const result =
+      approvalMode === "preapproved"
+        ? await this.tools.applyPatchWithPriorApproval({ changes }, "implement")
+        : await this.tools.applyPatchAfterUserApproval({ changes }, "implement");
     this.lastRunAppliedWorkspaceChange = result.includes("패치를 적용했습니다.");
     const response = [proposal.message?.trim(), result].filter(Boolean).join("\n\n");
     onDelta(response);
