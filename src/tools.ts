@@ -11,6 +11,7 @@ interface TextFileState {
   exists: boolean;
   text: string;
   eol: string;
+  isDirty: boolean;
 }
 
 interface PatchChangeInput {
@@ -29,8 +30,15 @@ interface PatchInput {
 interface PreparedPatch {
   edit: vscode.WorkspaceEdit;
   snapshots: FileSnapshotChange[];
+  targets: PreparedPatchTarget[];
   labels: string;
   count: number;
+}
+
+interface PreparedPatchTarget {
+  path: string;
+  uri: vscode.Uri;
+  after: string;
 }
 
 export class WorkspaceTools {
@@ -311,20 +319,28 @@ export class WorkspaceTools {
 
     const edit = new vscode.WorkspaceEdit();
     const snapshots: FileSnapshotChange[] = [];
+    const targets: PreparedPatchTarget[] = [];
     for (const change of changes) {
       const relativePath = String(change.path ?? "");
       const uri = this.resolveWorkspacePath(relativePath);
       const state = await readTextFileState(uri);
       const current = state.text;
       const exists = state.exists;
+      if (exists && state.isDirty) {
+        throw new Error(`${relativePath} 파일에 저장되지 않은 변경이 있습니다. 먼저 저장한 뒤 다시 적용하세요.`);
+      }
 
       if (typeof change.fullContent === "string") {
         if (!exists && !change.createIfMissing) {
           throw new Error(`${relativePath} 파일이 없습니다. 새로 만들려면 createIfMissing을 true로 설정하세요.`);
         }
         const after = exists ? adaptLineEndings(change.fullContent, state.eol) : change.fullContent;
+        if (exists && after === current) {
+          continue;
+        }
         replaceWholeDocument(edit, uri, exists ? current : "", after);
         snapshots.push({ path: relativePath, before: exists ? current : "", after, description: change.description });
+        targets.push({ path: relativePath, uri, after });
         continue;
       }
 
@@ -338,28 +354,66 @@ export class WorkspaceTools {
         }
         const replacement = adaptLineEndings(change.replacementText, state.eol);
         const next = current.replace(original, replacement);
+        if (next === current) {
+          continue;
+        }
         replaceWholeDocument(edit, uri, current, next);
         snapshots.push({ path: relativePath, before: current, after: next, description: change.description });
+        targets.push({ path: relativePath, uri, after: next });
         continue;
       }
 
       throw new Error(`${relativePath}에는 fullContent 또는 originalText/replacementText가 필요합니다.`);
     }
 
+    if (targets.length === 0) {
+      throw new Error("실제 변경된 파일이 없습니다. 제안된 변경이 현재 파일 내용과 동일합니다.");
+    }
+
     return {
       edit,
       snapshots,
-      labels: changes.map((change) => change.path ?? "[missing path]").join(", "),
-      count: changes.length,
+      targets,
+      labels: targets.map((target) => target.path).join(", "),
+      count: targets.length,
     };
   }
 
   private async applyPreparedPatch(prepared: PreparedPatch, mode: AgentMode): Promise<string> {
     const ok = await vscode.workspace.applyEdit(prepared.edit);
-    if (ok && prepared.snapshots.length > 0) {
-      await this.onChangeSet?.(mode, prepared.snapshots);
+    if (!ok) {
+      return "VS Code가 워크스페이스 편집을 거부했습니다.";
     }
-    return ok ? "패치를 적용했습니다." : "VS Code가 워크스페이스 편집을 거부했습니다.";
+
+    for (const target of prepared.targets) {
+      const document = await vscode.workspace.openTextDocument(target.uri);
+      if (document.getText() !== target.after) {
+        throw new Error(`${target.path} 파일에 패치가 예상대로 반영되지 않았습니다.`);
+      }
+      if (document.isDirty) {
+        const saved = await document.save();
+        if (!saved) {
+          throw new Error(`${target.path} 파일 저장에 실패했습니다.`);
+        }
+      }
+      const savedDocument = await vscode.workspace.openTextDocument(target.uri);
+      if (savedDocument.isDirty) {
+        throw new Error(`${target.path} 파일이 저장되지 않은 상태로 남아 있습니다.`);
+      }
+      if (savedDocument.getText() !== target.after) {
+        throw new Error(`${target.path} 파일 저장 후 내용이 예상과 다릅니다. 저장 시 포맷터나 다른 확장이 내용을 바꿨을 수 있습니다.`);
+      }
+    }
+
+    if (prepared.snapshots.length > 0) {
+      try {
+        await this.onChangeSet?.(mode, prepared.snapshots);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return `패치를 적용했습니다. 저장 및 검증 완료: ${prepared.labels}\n\n변경 스냅샷 저장은 실패했습니다: ${message}`;
+      }
+    }
+    return `패치를 적용했습니다. 저장 및 검증 완료: ${prepared.labels}`;
   }
 
   resolveWorkspacePath(input: string): vscode.Uri {
@@ -436,9 +490,9 @@ function replaceWholeDocument(edit: vscode.WorkspaceEdit, uri: vscode.Uri, curre
 async function readTextFileState(uri: vscode.Uri): Promise<TextFileState> {
   try {
     const document = await vscode.workspace.openTextDocument(uri);
-    return { exists: true, text: document.getText(), eol: documentLineEnding(document) };
+    return { exists: true, text: document.getText(), eol: documentLineEnding(document), isDirty: document.isDirty };
   } catch {
-    return { exists: false, text: "", eol: "\n" };
+    return { exists: false, text: "", eol: "\n", isDirty: false };
   }
 }
 
