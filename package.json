@@ -2,7 +2,7 @@
   "name": "company-code-ai",
   "displayName": "Company Code AI",
   "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,
@@ -238,11 +238,13 @@
     "test:encoding": "npm run compile && node scripts/test-text-encoding.mjs",
     "test:patch": "npm run compile && node scripts/test-patch-protocol.mjs",
     "test:proposal": "npm run compile && node scripts/test-proposal-text.mjs",
+    "test:webview": "node scripts/test-webview.mjs",
+    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-webview.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",
     "package:vsix": "npm run prepare:release && vsce package --out release/company-code-ai.vsix",
-    "vscode:prepublish": "npm run check:endpoints && npm run compile"
+    "vscode:prepublish": "npm run check:endpoints && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
