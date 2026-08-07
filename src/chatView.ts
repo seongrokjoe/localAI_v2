@@ -4,7 +4,7 @@ import { readRuntimeConfig, secretTokenKey, updateSetting } from "./config";
 import { ContextManager } from "./context";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
-import { AgentMode, AiChangeBlock, ChangeWorkbenchState } from "./types";
+import { AgentMode, ChangeWorkbenchState, LineMappedChange, SourceSnapshot } from "./types";
 import { ChangeWorkbenchManager } from "./changeWorkbench";
 
 interface WebviewMessage {
@@ -23,7 +23,7 @@ interface SendOptions {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortController?: AbortController;
-  private lastImplementation?: { prompt: string; response: string; blocks: AiChangeBlock[] };
+  private lastImplementation?: { prompt: string; response: string; blocks: LineMappedChange[]; snapshots: SourceSnapshot[] };
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -192,7 +192,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const state = await this.changeWorkbench.createManual(
         implementation.prompt,
         implementation.response,
-        this.contextManager.list(),
       );
       this.postWorkbenchState(state);
       this.view?.webview.postMessage({ type: "status", text: "변경 작업대 편집 중" });
@@ -249,8 +248,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           mode: this.modeManager.current,
           memory: this.sessionStore.memoryContext(),
         },
-        (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
+        () => undefined,
         this.abortController.signal,
+        (status) => {
+          this.view?.webview.postMessage({ type: "operation", text: status });
+          this.view?.webview.postMessage({ type: "status", text: status });
+        },
       );
       const response = result.content;
       const displayResponse = this.modeManager.current === "implement" && response.trim()
@@ -263,10 +266,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: "planActions", text: response });
       }
       if (this.modeManager.current === "implement" && displayResponse.trim() && !this.agent.lastRunAppliedChange) {
-        this.lastImplementation = { prompt, response: displayResponse, blocks: result.changeBlocks };
+        this.lastImplementation = { prompt, response: displayResponse, blocks: result.changeBlocks, snapshots: result.sourceSnapshots };
         if (result.changeBlocks.length > 0) {
           this.view?.webview.postMessage({ type: "status", text: "변경 작업대 여는 중" });
-          const state = await this.changeWorkbench.create(prompt, displayResponse, result.changeBlocks, this.contextManager.list());
+          const state = await this.changeWorkbench.create(prompt, displayResponse, result.changeBlocks, result.sourceSnapshots);
           this.postWorkbenchState(state);
           this.view?.webview.postMessage({ type: "assistant", text: `코드 변경 블록 ${result.changeBlocks.length}개를 변경 작업대에 열었습니다.` });
           this.view?.webview.postMessage({ type: "status", text: "변경 작업대 편집 중" });

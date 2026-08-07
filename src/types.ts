@@ -106,27 +106,43 @@ export interface AgentRunOptions {
   memory: AgentMemoryContext;
 }
 
-export interface AiChangeBlock {
+export type LineChangeOperation = "replace" | "insert_before" | "insert_after" | "create_file";
+
+export interface SourceSnapshot {
   id: string;
-  pathHint?: string;
-  languageId?: string;
+  path: string;
+  uri: string;
+  snapshot: string;
+  languageId: string;
+  text: string;
+  lineCount: number;
+}
+
+export interface LineMappedChange {
+  id: string;
+  protocolId: string;
+  fileId: string;
+  snapshot: string;
+  operation: LineChangeOperation;
+  path?: string;
+  startLine: number;
+  endLine: number;
   description?: string;
-  originalText?: string;
-  proposedText: string;
-  startLine?: number;
-  endLine?: number;
-  source: "tool" | "json" | "markdown" | "manual";
+  code: string;
+  mappingError?: string;
 }
 
 export interface AgentRunResult {
   content: string;
-  changeBlocks: AiChangeBlock[];
+  changeBlocks: LineMappedChange[];
+  sourceSnapshots: SourceSnapshot[];
+  issues: string[];
 }
 
 export type WorkbenchMappingStatus = "mapped" | "needs-file" | "needs-range" | "stale";
 
-export interface ChangeWorkbenchBlockState extends AiChangeBlock {
-  fileId?: string;
+export interface ChangeWorkbenchBlockState extends LineMappedChange {
+  targetFileId?: string;
   mappingStatus: WorkbenchMappingStatus;
   mappingLabel: string;
   selected: boolean;

@@ -2,21 +2,23 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import {
-  AiChangeBlock,
+  LineMappedChange,
+  SourceSnapshot,
   ChangeWorkbenchBlockState,
   ChangeWorkbenchFileState,
   ChangeWorkbenchState,
-  ContextItem,
   PatchApplyOutcome,
   WorkbenchMappingStatus,
 } from "./types";
 import { WorkspaceTools } from "./tools";
+import { lineOperationOffsets, replacementForLineChange } from "./lineChangeMapping";
 
-interface WorkbenchBlock extends AiChangeBlock {
-  fileId?: string;
+interface WorkbenchBlock extends LineMappedChange {
+  targetFileId?: string;
   mappingStatus: WorkbenchMappingStatus;
   startOffset?: number;
   endOffset?: number;
+  originalText?: string;
   currentText?: string;
   selected: boolean;
   manuallyEdited: boolean;
@@ -33,10 +35,11 @@ interface WorkbenchFile {
   languageId: string;
   eol: string;
   saved: boolean;
+  isNew: boolean;
 }
 
 interface WorkbenchSession {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   prompt: string;
   assistantResponse: string;
@@ -48,7 +51,7 @@ interface WorkbenchSession {
 }
 
 interface StoredWorkbench {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   prompt: string;
   assistantResponse: string;
@@ -99,7 +102,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     try {
       const bytes = await vscode.workspace.fs.readFile(this.activeStateUri());
       const stored = JSON.parse(new TextDecoder().decode(bytes)) as Partial<StoredWorkbench>;
-      if (stored.schemaVersion !== 2 || !stored.id || !stored.rootUri || !stored.files || !stored.blocks) {
+      if (stored.schemaVersion !== 3 || !stored.id || !stored.rootUri || !stored.files || !stored.blocks) {
         await this.clearActiveState();
         this.output.appendLine("[변경 작업대] 이전 conflict 기반 작업본은 복원하지 않았습니다. 원본 파일은 변경되지 않았습니다.");
         return;
@@ -117,7 +120,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
         });
       }
       this.active = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         id: stored.id,
         prompt: stored.prompt ?? "",
         assistantResponse: stored.assistantResponse ?? "",
@@ -133,7 +136,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     }
   }
 
-  async create(prompt: string, assistantResponse: string, sourceBlocks: AiChangeBlock[], contextItems: ContextItem[]): Promise<ChangeWorkbenchState> {
+  async create(prompt: string, assistantResponse: string, sourceBlocks: LineMappedChange[], sourceSnapshots: SourceSnapshot[]): Promise<ChangeWorkbenchState> {
     if (this.active) {
       const choice = await vscode.window.showWarningMessage(
         "진행 중인 변경 작업대를 버리고 새 작업대를 열까요?",
@@ -148,7 +151,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     const rootUri = vscode.Uri.joinPath(this.workbenchesRoot(), id);
     await vscode.workspace.fs.createDirectory(rootUri);
     const session: WorkbenchSession = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id,
       prompt,
       assistantResponse,
@@ -158,22 +161,21 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       blocks: sourceBlocks.map((block) => ({
         ...block,
         id: block.id || crypto.randomUUID(),
-        mappingStatus: "needs-file",
+        mappingStatus: block.mappingError ? "needs-range" : "needs-file",
         selected: false,
         manuallyEdited: false,
       })),
     };
     this.active = session;
 
-    const contextUris = contextItems
-      .filter((item) => item.uri && (item.type === "file" || item.type === "selection"))
-      .map((item) => vscode.Uri.parse(item.uri as string));
     for (const block of session.blocks) {
-      const uri = await this.resolveTarget(block.pathHint) ?? (contextUris.length === 1 ? contextUris[0] : undefined);
-      if (!uri) continue;
-      const file = await this.ensureFile(session, uri);
-      block.fileId = file.id;
-      await this.mapFromHints(block, file, contextItems);
+      try {
+        await this.attachInitialBlock(session, block, sourceSnapshots);
+      } catch (error) {
+        block.mappingStatus = "needs-file";
+        block.mappingError = error instanceof Error ? error.message : String(error);
+        this.output.appendLine(`[변경 작업대] ${block.id} 자동 매핑 실패: ${block.mappingError}`);
+      }
     }
 
     session.activeFileId = session.files[0]?.id;
@@ -182,13 +184,43 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     return await this.getState();
   }
 
-  async createManual(prompt: string, assistantResponse: string, contextItems: ContextItem[]): Promise<ChangeWorkbenchState> {
+  async createManual(prompt: string, assistantResponse: string): Promise<ChangeWorkbenchState> {
     return await this.create(prompt, assistantResponse, [{
       id: crypto.randomUUID(),
+      protocolId: "MANUAL",
+      fileId: "",
+      snapshot: "",
+      operation: "replace",
+      startLine: 0,
+      endLine: 0,
       description: "수동 변경 블록",
-      proposedText: assistantResponse,
-      source: "manual",
-    }], contextItems);
+      code: assistantResponse,
+      mappingError: "대상 파일과 범위를 직접 선택하세요.",
+    }], []);
+  }
+
+  private async attachInitialBlock(session: WorkbenchSession, block: WorkbenchBlock, sourceSnapshots: SourceSnapshot[]): Promise<void> {
+    if (block.operation === "create_file") {
+      if (!block.path || block.mappingError) return;
+      const duplicate = session.blocks.find((candidate) => candidate !== block && candidate.operation === "create_file" && candidate.path === block.path && candidate.targetFileId);
+      if (duplicate) throw new Error(`같은 새 파일에 create_file 변경이 두 번 제출되었습니다: ${block.path}`);
+      const file = await this.ensureNewFile(session, block.path);
+      block.targetFileId = file.id;
+      block.startOffset = 0;
+      block.endOffset = 0;
+      block.originalText = "";
+      block.currentText = "";
+      block.mappingStatus = "mapped";
+      return;
+    }
+    const snapshot = sourceSnapshots.find((candidate) => candidate.id === block.fileId);
+    if (!snapshot || snapshot.snapshot !== block.snapshot || block.mappingError) {
+      block.mappingStatus = snapshot ? "stale" : "needs-file";
+      return;
+    }
+    const file = await this.ensureFile(session, vscode.Uri.parse(snapshot.uri), snapshot);
+    block.targetFileId = file.id;
+    this.mapByLineNumbers(block, file);
   }
 
   async currentState(): Promise<ChangeWorkbenchState | undefined> {
@@ -275,7 +307,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     });
     this.draftColumn = editor.viewColumn;
     const firstMapped = session.blocks.find((block) =>
-      block.fileId === file.id && block.mappingStatus === "mapped" && block.startOffset !== undefined && block.endOffset !== undefined,
+      block.targetFileId === file.id && block.mappingStatus === "mapped" && block.startOffset !== undefined && block.endOffset !== undefined,
     );
     if (firstMapped?.startOffset !== undefined && firstMapped.endOffset !== undefined) {
       const range = new vscode.Range(document.positionAt(firstMapped.startOffset), document.positionAt(firstMapped.endOffset));
@@ -289,10 +321,10 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
   private async toggleBlock(blockId: string, checked: boolean): Promise<void> {
     const session = this.requireActive();
     const block = this.requireBlock(session, blockId);
-    if (!block.fileId || block.startOffset === undefined || block.endOffset === undefined || block.mappingStatus !== "mapped") {
+    if (!block.targetFileId || block.startOffset === undefined || block.endOffset === undefined || block.mappingStatus !== "mapped") {
       throw new Error("먼저 오른쪽 작업 파일에서 이 코드 블록의 대상 범위를 연결하세요.");
     }
-    const file = this.requireFile(session, block.fileId);
+    const file = this.requireFile(session, block.targetFileId);
     if (checked && this.overlapsSelectedBlock(session, block)) {
       throw new Error("이미 선택한 다른 AI 블록과 대상 범위가 겹칩니다. 한 블록만 선택하거나 범위를 다시 연결하세요.");
     }
@@ -305,7 +337,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       );
       if (choice !== "원문 복원") return;
     }
-    const replacement = checked ? block.proposedText : (block.originalText ?? "");
+    const replacement = checked ? this.replacementForBlock(file, block) : (block.originalText ?? "");
     await this.replaceMappedBlock(file, block, replacement);
     block.selected = checked;
     block.manuallyEdited = false;
@@ -317,7 +349,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
 
   private async copyBlock(blockId: string): Promise<void> {
     const block = this.requireBlock(this.requireActive(), blockId);
-    await vscode.env.clipboard.writeText(block.proposedText);
+    await vscode.env.clipboard.writeText(block.code);
     this.post({ type: "status", text: "AI 코드 블록을 클립보드에 복사했습니다." });
   }
 
@@ -336,7 +368,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     if (!uri) return;
     if (!vscode.workspace.getWorkspaceFolder(uri)) throw new Error("대상 파일은 현재 워크스페이스 안에 있어야 합니다.");
     const file = await this.ensureFile(session, uri);
-    block.fileId = file.id;
+    block.targetFileId = file.id;
     block.mappingStatus = "needs-range";
     block.startOffset = undefined;
     block.endOffset = undefined;
@@ -352,11 +384,11 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
   private async mapCurrentSelection(blockId: string): Promise<void> {
     const session = this.requireActive();
     const block = this.requireBlock(session, blockId);
-    if (!block.fileId) {
+    if (!block.targetFileId) {
       await this.chooseTarget(blockId);
       return;
     }
-    const file = this.requireFile(session, block.fileId);
+    const file = this.requireFile(session, block.targetFileId);
     const editor = vscode.window.visibleTextEditors.find((candidate) => candidate.document.uri.toString() === file.draftUri.toString());
     if (!editor || editor.selection.isEmpty) {
       await this.openDraft(file.id);
@@ -364,6 +396,9 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     }
     block.startOffset = editor.document.offsetAt(editor.selection.start);
     block.endOffset = editor.document.offsetAt(editor.selection.end);
+    block.operation = "replace";
+    block.startLine = editor.selection.start.line + 1;
+    block.endLine = editor.selection.end.line + 1;
     block.originalText = editor.document.getText(editor.selection);
     block.currentText = block.originalText;
     block.mappingStatus = "mapped";
@@ -394,11 +429,14 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       return { status: "notApplied", message: session.message, targets: [] };
     }
     this.post({ type: "operation", text: `${file.path} 저장 중` });
-    const outcome = await this.tools.applyCompletedFiles([{ path: file.path, expectedText: file.baseText, finalText }], "implement");
+    const outcome = file.isNew
+      ? await this.tools.applyPatchWithPriorApproval({ changes: [{ path: file.path, fullContent: finalText, createIfMissing: true }] }, "implement")
+      : await this.tools.applyCompletedFiles([{ path: file.path, expectedText: file.baseText, finalText }], "implement");
     if (outcome.status === "applied") {
       file.baseText = finalText;
       file.baseHash = hashText(finalText);
       file.saved = true;
+      file.isNew = false;
       await vscode.workspace.fs.writeFile(file.baseUri, new TextEncoder().encode(finalText));
       session.message = `${file.path}: 실제 파일 저장과 검증을 완료했습니다.`;
       this.post({ type: "saveResult", ok: true, text: session.message });
@@ -409,6 +447,17 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       this.post({ type: "saveResult", ok: false, text: session.message });
     }
     return outcome;
+  }
+
+  private replacementForBlock(file: WorkbenchFile, block: WorkbenchBlock): string {
+    return replacementForLineChange(
+      block.operation,
+      block.code,
+      block.originalText ?? "",
+      block.startOffset ?? 0,
+      file.baseText,
+      file.eol,
+    );
   }
 
   private async replaceMappedBlock(file: WorkbenchFile, block: WorkbenchBlock, replacementText: string): Promise<void> {
@@ -449,7 +498,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
   private adjustMappings(file: WorkbenchFile, changeStart: number, changeEnd: number, text: string, targetBlockId: string | undefined, manual: boolean): void {
     if (!this.active) return;
     const delta = text.length - (changeEnd - changeStart);
-    for (const block of this.active.blocks.filter((candidate) => candidate.fileId === file.id)) {
+    for (const block of this.active.blocks.filter((candidate) => candidate.targetFileId === file.id)) {
       if (block.startOffset === undefined || block.endOffset === undefined) continue;
       if (block.id === targetBlockId) {
         block.startOffset = changeStart;
@@ -472,57 +521,26 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     }
   }
 
-  private async mapFromHints(block: WorkbenchBlock, file: WorkbenchFile, contextItems: ContextItem[]): Promise<void> {
-    const document = await vscode.workspace.openTextDocument(file.originalUri);
-    const text = document.getText();
-    let start: number | undefined;
-    let end: number | undefined;
-    if (block.originalText !== undefined) {
-      const expected = adaptEol(block.originalText, file.eol);
-      const first = text.indexOf(expected);
-      if (first >= 0 && text.indexOf(expected, first + Math.max(1, expected.length)) < 0) {
-        start = first;
-        end = first + expected.length;
-      }
-    }
-    if (start === undefined && block.startLine !== undefined && block.endLine !== undefined && block.endLine <= document.lineCount) {
-      const range = new vscode.Range(
-        new vscode.Position(block.startLine - 1, 0),
-        document.lineAt(block.endLine - 1).rangeIncludingLineBreak.end,
-      );
-      start = document.offsetAt(range.start);
-      end = document.offsetAt(range.end);
-    }
-    if (start === undefined) {
-      const selection = contextItems.find((item) => item.type === "selection" && item.uri === file.originalUri.toString() && item.range);
-      if (selection?.range) {
-        const range = new vscode.Range(
-          selection.range.startLine,
-          selection.range.startCharacter,
-          selection.range.endLine,
-          selection.range.endCharacter,
-        );
-        start = document.offsetAt(range.start);
-        end = document.offsetAt(range.end);
-      }
-    }
-    if (start === undefined || end === undefined) {
+  private mapByLineNumbers(block: WorkbenchBlock, file: WorkbenchFile): void {
+    const offsets = lineOperationOffsets(file.baseText, block.operation, block.startLine, block.endLine);
+    if (!offsets) {
       block.mappingStatus = "needs-range";
+      block.mappingError = `${block.startLine}-${block.endLine}줄을 원본 파일 범위로 변환할 수 없습니다.`;
       return;
     }
-    block.startOffset = start;
-    block.endOffset = end;
-    block.originalText = text.slice(start, end);
+    block.startOffset = offsets.start;
+    block.endOffset = offsets.end;
+    block.originalText = file.baseText.slice(offsets.start, offsets.end);
     block.currentText = block.originalText;
     block.mappingStatus = "mapped";
   }
 
-  private async ensureFile(session: WorkbenchSession, uri: vscode.Uri): Promise<WorkbenchFile> {
+  private async ensureFile(session: WorkbenchSession, uri: vscode.Uri, snapshot?: SourceSnapshot): Promise<WorkbenchFile> {
     const existing = session.files.find((file) => file.originalUri.toString() === uri.toString());
     if (existing) return existing;
     if (!vscode.workspace.getWorkspaceFolder(uri)) throw new Error("변경 작업대는 현재 워크스페이스 안의 파일만 사용할 수 있습니다.");
     const document = await vscode.workspace.openTextDocument(uri);
-    const baseText = document.getText();
+    const baseText = snapshot?.text ?? document.getText();
     const index = session.files.length + 1;
     const basename = path.basename(uri.fsPath);
     const extension = path.extname(basename);
@@ -540,29 +558,51 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       baseText,
       baseHash: hashText(baseText),
       languageId: document.languageId,
-      eol: document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n",
+      eol: detectEol(baseText, document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n"),
       saved: false,
+      isNew: false,
     };
     session.files.push(file);
     return file;
   }
 
-  private async resolveTarget(pathHint: string | undefined): Promise<vscode.Uri | undefined> {
-    if (!pathHint) return undefined;
+  private async ensureNewFile(session: WorkbenchSession, relativePath: string): Promise<WorkbenchFile> {
+    const normalized = normalizeRelativePath(relativePath);
     const folders = vscode.workspace.workspaceFolders ?? [];
-    const normalized = pathHint.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (path.isAbsolute(pathHint)) {
-      const absolute = vscode.Uri.file(pathHint);
-      return vscode.workspace.getWorkspaceFolder(absolute) && await exists(absolute) ? absolute : undefined;
+    if (folders.length === 0) throw new Error("새 파일을 만들 워크스페이스가 없습니다.");
+    let folder = folders[0];
+    let localPath = normalized;
+    if (folders.length > 1) {
+      const matched = folders.find((candidate) => normalized.startsWith(`${candidate.name}/`));
+      if (!matched) throw new Error(`다중 루트 워크스페이스의 새 파일 경로에는 루트 이름이 필요합니다: ${relativePath}`);
+      folder = matched;
+      localPath = normalized.slice(matched.name.length + 1);
     }
-    for (const folder of folders) {
-      const relative = normalized.startsWith(`${folder.name}/`) ? normalized.slice(folder.name.length + 1) : normalized;
-      const candidate = vscode.Uri.joinPath(folder.uri, ...relative.split("/"));
-      if (await exists(candidate)) return candidate;
-    }
-    const basename = path.posix.basename(normalized);
-    const matches = await vscode.workspace.findFiles(`**/${basename}`, "**/{.git,node_modules,bin,obj,dist,build}/**", 20);
-    return matches.length === 1 ? matches[0] : undefined;
+    const uri = vscode.Uri.joinPath(folder.uri, ...localPath.split("/"));
+    if (await exists(uri)) throw new Error(`create_file 대상이 이미 존재합니다: ${relativePath}`);
+    const index = session.files.length + 1;
+    const basename = path.basename(uri.fsPath);
+    const extension = path.extname(basename);
+    const stem = extension ? basename.slice(0, -extension.length) : basename;
+    const draftUri = vscode.Uri.joinPath(session.rootUri, `${index}-${basename}`);
+    const baseUri = vscode.Uri.joinPath(session.rootUri, `${index}-${stem}.base${extension}`);
+    await vscode.workspace.fs.writeFile(draftUri, new Uint8Array());
+    await vscode.workspace.fs.writeFile(baseUri, new Uint8Array());
+    const file: WorkbenchFile = {
+      id: crypto.randomUUID(),
+      path: folders.length > 1 ? `${folder.name}/${localPath}` : localPath,
+      originalUri: uri,
+      draftUri,
+      baseUri,
+      baseText: "",
+      baseHash: hashText(""),
+      languageId: languageIdForPath(localPath),
+      eol: "\n",
+      saved: false,
+      isNew: true,
+    };
+    session.files.push(file);
+    return file;
   }
 
   private async revealBlock(file: WorkbenchFile, block: WorkbenchBlock): Promise<void> {
@@ -576,9 +616,9 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
   }
 
   private overlapsSelectedBlock(session: WorkbenchSession, block: WorkbenchBlock): boolean {
-    if (!block.fileId || block.startOffset === undefined || block.endOffset === undefined) return false;
+    if (!block.targetFileId || block.startOffset === undefined || block.endOffset === undefined) return false;
     return session.blocks.some((candidate) =>
-      candidate.id !== block.id && candidate.fileId === block.fileId && candidate.selected &&
+      candidate.id !== block.id && candidate.targetFileId === block.targetFileId && candidate.selected &&
       candidate.startOffset !== undefined && candidate.endOffset !== undefined &&
       candidate.startOffset < (block.endOffset as number) && (block.startOffset as number) < candidate.endOffset,
     );
@@ -595,20 +635,22 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
         draftPath: file.draftUri.fsPath,
         changed: document.getText() !== file.baseText,
         saved: file.saved,
-        blockIds: session.blocks.filter((block) => block.fileId === file.id).map((block) => block.id),
+        blockIds: session.blocks.filter((block) => block.targetFileId === file.id).map((block) => block.id),
       });
     }
     const blocks: ChangeWorkbenchBlockState[] = session.blocks.map((block) => ({
       id: block.id,
-      pathHint: block.pathHint,
-      languageId: block.languageId,
+      protocolId: block.protocolId,
+      fileId: block.fileId,
+      snapshot: block.snapshot,
+      operation: block.operation,
+      path: block.path,
       description: block.description,
-      originalText: block.originalText,
-      proposedText: block.proposedText,
+      code: block.code,
       startLine: block.startLine,
       endLine: block.endLine,
-      source: block.source,
-      fileId: block.fileId,
+      mappingError: block.mappingError,
+      targetFileId: block.targetFileId,
       mappingStatus: block.mappingStatus,
       mappingLabel: mappingLabel(block, session.files),
       selected: block.selected,
@@ -663,7 +705,7 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
   private async saveActive(): Promise<void> {
     if (!this.active) return;
     const stored: StoredWorkbench = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: this.active.id,
       prompt: this.active.prompt,
       assistantResponse: this.active.assistantResponse,
@@ -737,11 +779,12 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
 }
 
 function mappingLabel(block: WorkbenchBlock, files: WorkbenchFile[]): string {
-  const file = files.find((candidate) => candidate.id === block.fileId);
+  const file = files.find((candidate) => candidate.id === block.targetFileId);
   if (block.mappingStatus === "needs-file") return "대상 파일 필요";
-  if (block.mappingStatus === "needs-range") return `${file?.path ?? block.pathHint ?? "대상"}: 범위 선택 필요`;
+  if (block.mappingStatus === "needs-range") return `${file?.path ?? block.path ?? "대상"}: 범위 선택 필요`;
   if (block.mappingStatus === "stale") return `${file?.path ?? "대상"}: 범위 재연결 필요`;
-  return `${file?.path ?? block.pathHint ?? "대상"}: 연결됨${block.manuallyEdited ? " · 수동 편집" : ""}`;
+  const range = block.operation === "create_file" ? "새 파일" : `${block.startLine}-${block.endLine}줄 · ${block.operation}`;
+  return `${file?.path ?? block.path ?? "대상"}: ${range}${block.manuallyEdited ? " · 수동 편집" : ""}`;
 }
 
 function hashText(content: string): string {
@@ -750,6 +793,32 @@ function hashText(content: string): string {
 
 function adaptEol(content: string, eol: string): string {
   return content.replace(/\r\n|\r|\n/g, eol);
+}
+
+function detectEol(content: string, fallback: string): string {
+  const match = /\r\n|\r|\n/.exec(content);
+  return match?.[0] ?? fallback;
+}
+
+function normalizeRelativePath(value: string): string {
+  const normalized = value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized || path.posix.isAbsolute(normalized) || /^[a-z]:\//i.test(normalized)) {
+    throw new Error(`새 파일 경로는 워크스페이스 상대 경로여야 합니다: ${value}`);
+  }
+  const parts = normalized.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error(`안전하지 않은 새 파일 경로입니다: ${value}`);
+  }
+  return parts.join("/");
+}
+
+function languageIdForPath(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  return ({
+    ".ts": "typescript", ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact",
+    ".cs": "csharp", ".cpp": "cpp", ".cc": "cpp", ".c": "c", ".h": "cpp", ".hpp": "cpp",
+    ".py": "python", ".java": "java", ".json": "json", ".xml": "xml", ".html": "html", ".css": "css",
+  } as Record<string, string>)[extension] ?? "plaintext";
 }
 
 async function exists(uri: vscode.Uri): Promise<boolean> {

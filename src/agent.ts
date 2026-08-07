@@ -1,14 +1,14 @@
 import * as vscode from "vscode";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   AgentMode,
   AgentRunResult,
   AgentRunOptions,
-  AiChangeBlock,
   AssistantPatchApplyResult,
   ContextItem,
   ChatMessage,
   RuntimeConfig,
+  SourceSnapshot,
   ChatToolCall,
   ChatToolDefinition,
   PatchApplyOutcome,
@@ -23,7 +23,7 @@ import { formatPatchApplyOutcome, WorkspaceTools } from "./tools";
 import { parsePatchResponse, parseTargetResponse } from "./patchProtocol";
 import { isLineRangeChange } from "./patchText";
 import { extractReplacementContent } from "./proposalText";
-import { extractChangeBlocks, mergeChangeBlocks, parseChangeBlockArguments } from "./changeBlockParser";
+import { parseLineChangeResponse, renderNumberedFile } from "./lineChangeProtocol";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -44,13 +44,8 @@ const modePrompts: Record<AgentMode, string> = {
   ].join("\n"),
   implement: [
     "현재 모드는 ImplementMode입니다.",
-    "승인된 계획 또는 사용자 요청에 맞는 구체적인 변경 내용을 작성하세요.",
-    "승인된 계획 또는 사용자의 직접 요청 범위 안에서만 좁게 수정하세요.",
-    "채팅 텍스트로 '패치를 적용하시겠습니까?', '예/아니오' 같은 승인 질문을 출력하지 마세요.",
-    "파일을 수정했다고 단정하지 말고 대상 파일 경로와 변경할 코드의 의도를 명확히 설명하세요.",
-    "수정 코드가 있으면 가능할 때 submitChangeBlocks 도구로 파일별 코드 블록을 제출하세요.",
-    "각 블록에는 실제 파일 경로, 교체할 기존 원문(originalText), 수정 코드(proposedText), 짧은 설명을 포함하세요.",
-    "도구를 사용할 수 없으면 파일 경로를 제목에 적고 수정 코드를 Markdown 코드 블록으로 제시하세요.",
+    "구현 모드는 별도의 라인 변경 프로토콜로 실행됩니다.",
+    "제공된 파일 스냅샷과 전역 줄 번호만 사용해 변경 범위를 식별합니다.",
   ].join("\n"),
 };
 
@@ -159,8 +154,12 @@ export class CodeAgent {
     options: AgentRunOptions,
     onDelta: (text: string) => void,
     signal?: AbortSignal,
+    onStatus?: (text: string) => void | Promise<void>,
   ): Promise<AgentRunResult> {
     this.lastRunAppliedWorkspaceChange = false;
+    if (options.mode === "implement") {
+      return await this.runLineMappedImplementation(prompt, contextItems, config, options, signal, onStatus);
+    }
     const contextPack = await this.buildContextPack(prompt, contextItems, config.maxContextTokens, options);
     const messages: ChatMessage[] = [
       { role: "system", content: `${baseSystemPrompt}\n\n${modePrompts[options.mode]}` },
@@ -177,16 +176,12 @@ export class CodeAgent {
 
     const client = new LlmClient(config);
     let accumulated = "";
-    let submittedBlocks: AiChangeBlock[] = [];
     const toolMode = config.toolCallMode;
     const useNativeTools = toolMode === "native" || toolMode === "auto";
     const useJsonTools = toolMode === "json" || toolMode === "auto";
 
     for (let step = 0; step < 4; step++) {
       const nativeDefinitions = this.tools.definitionsForMode(options.mode, false);
-      if (options.mode === "implement") {
-        nativeDefinitions.push(changeBlocksToolDefinition());
-      }
       const result = await client.complete({
         messages,
         tools: useNativeTools ? nativeDefinitions : undefined,
@@ -199,7 +194,7 @@ export class CodeAgent {
 
       const toolCalls = result.toolCalls.length > 0 ? result.toolCalls : useJsonTools ? parseJsonEnvelope(result.content) : [];
       if (toolCalls.length === 0) {
-        return finishAgentRun(accumulated, submittedBlocks, options.mode);
+        return finishPlanRun(accumulated);
       }
 
       messages.push({
@@ -209,18 +204,7 @@ export class CodeAgent {
       });
 
       for (const toolCall of toolCalls) {
-        let toolResult: string;
-        if (toolCall.function.name === "submitChangeBlocks" && options.mode === "implement") {
-          const parsed = parseChangeBlockArguments(toolCall.function.arguments);
-          submittedBlocks = mergeChangeBlocks(submittedBlocks, parsed);
-          toolResult = parsed.length > 0
-            ? `${parsed.length}개 코드 변경 블록을 로컬 변경 작업대에 등록했습니다.`
-            : "변경 블록 형식을 읽지 못했습니다. 경로와 proposedText를 확인하세요.";
-        } else {
-          toolResult = toolCall.function.name === "applyPatchAfterUserApproval"
-            ? "파일 변경은 검증된 패치를 만든 뒤 확장 승인 UI에서 처리합니다. 지금은 변경 내용을 설명하세요."
-            : await this.executeToolCall(toolCall, options.mode);
-        }
+        const toolResult = await this.executeToolCall(toolCall, options.mode);
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id || toolCall.function.name,
@@ -229,7 +213,124 @@ export class CodeAgent {
       }
     }
 
-    return finishAgentRun(accumulated, submittedBlocks, options.mode);
+    return finishPlanRun(accumulated);
+  }
+
+  private async runLineMappedImplementation(
+    prompt: string,
+    contextItems: ContextItem[],
+    config: RuntimeConfig,
+    options: AgentRunOptions,
+    signal?: AbortSignal,
+    onStatus?: (text: string) => void | Promise<void>,
+  ): Promise<AgentRunResult> {
+    await onStatus?.("구현 대상 파일 확인 중");
+    const uris = await this.collectImplementationUris(contextItems);
+    const snapshots = await this.createSourceSnapshots(uris);
+    const implementationPrompt = truncateToTokens(prompt, 30000);
+    const memory = truncateToTokens(renderMemory(options), 10000);
+    const summary = truncateToTokens(await readSummaryForContext(10000), 10000);
+    const batches = buildImplementationBatches(snapshots, implementationPrompt, memory, summary);
+    const client = new LlmClient(config);
+    const changes: AgentRunResult["changeBlocks"] = [];
+    const issues: string[] = [];
+
+    for (let index = 0; index < batches.length; index++) {
+      if (signal?.aborted) throw new vscode.CancellationError();
+      const protocolId = `P${randomBytes(6).toString("hex").toUpperCase()}`;
+      await onStatus?.(`AI 변경 코드 생성 중 (${index + 1}/${batches.length})`);
+      const messages: ChatMessage[] = [
+        { role: "system", content: implementationProtocolPrompt(protocolId) },
+        {
+          role: "user",
+          content: [
+            "아래 프로젝트 정보와 줄 번호가 포함된 원본 파일만 근거로 요청을 구현하세요.",
+            memory ? `<memory>\n${memory}\n</memory>` : "",
+            summary ? `<projectSummary>\n${summary}\n</projectSummary>` : "",
+            `<request>\n${implementationPrompt}\n</request>`,
+            batches[index].join("\n\n"),
+          ].filter(Boolean).join("\n\n"),
+        },
+      ];
+
+      try {
+        const result = await client.complete({ messages, signal, onDelta: () => undefined });
+        const parsed = parseLineChangeResponse(result.content, protocolId);
+        changes.push(...parsed.changes);
+        issues.push(...parsed.issues.map((issue) => `요청 ${index + 1}: ${issue}`));
+        this.output.appendLine(`[라인 변경 프로토콜] 요청 ${index + 1}/${batches.length}: 변경 ${parsed.changes.length}개, 경고 ${parsed.issues.length}개`);
+      } catch (error) {
+        if (signal?.aborted || error instanceof vscode.CancellationError) throw error;
+        const issue = `요청 ${index + 1}/${batches.length} 실패: ${errorMessage(error)}`;
+        issues.push(issue);
+        this.output.appendLine(`[라인 변경 프로토콜] ${issue}`);
+      }
+    }
+
+    const uniqueChanges = deduplicateLineChanges(changes).map((change, index) => ({
+      ...change,
+      id: `${change.protocolId}-${String(index + 1).padStart(4, "0")}`,
+    }));
+    const summaryLines = uniqueChanges.map((change) => {
+      const source = snapshots.find((snapshot) => snapshot.id === change.fileId);
+      const target = change.operation === "create_file" ? change.path ?? "새 파일" : (source?.path ?? change.fileId) || "매핑되지 않은 파일";
+      const range = change.operation === "create_file" ? "새 파일" : `${change.startLine}-${change.endLine}줄`;
+      return `- ${target} (${range}, ${change.operation}): ${change.description || "코드 변경"}`;
+    });
+    const content = [
+      uniqueChanges.length > 0 ? `AI가 코드 변경 ${uniqueChanges.length}개를 생성했습니다.` : "AI 응답에서 적용 가능한 코드 변경을 찾지 못했습니다.",
+      ...summaryLines,
+      issues.length > 0 ? `\n확인 필요:\n${issues.map((issue) => `- ${issue}`).join("\n")}` : "",
+    ].filter(Boolean).join("\n");
+    return { content, changeBlocks: uniqueChanges, sourceSnapshots: snapshots, issues };
+  }
+
+  private async collectImplementationUris(contextItems: ContextItem[]): Promise<vscode.Uri[]> {
+    const byUri = new Map<string, vscode.Uri>();
+    for (const item of contextItems) {
+      if ((item.type === "file" || item.type === "selection") && item.uri) {
+        const uri = vscode.Uri.parse(item.uri);
+        byUri.set(uri.toString(), uri);
+      }
+    }
+    if (byUri.size === 0) {
+      const selected = await vscode.window.showOpenDialog({
+        title: "구현에 사용할 원본 파일 선택",
+        defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: true,
+        openLabel: "구현 파일로 사용",
+      });
+      for (const uri of selected ?? []) byUri.set(uri.toString(), uri);
+    }
+    if (byUri.size === 0) {
+      throw new Error("구현 모드에는 원본 파일이 필요합니다. 파일 컨텍스트를 추가하거나 파일 선택 창에서 대상을 선택하세요.");
+    }
+    return [...byUri.values()];
+  }
+
+  private async createSourceSnapshots(uris: vscode.Uri[]): Promise<SourceSnapshot[]> {
+    const snapshots: SourceSnapshot[] = [];
+    for (let index = 0; index < uris.length; index++) {
+      const uri = uris[index];
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      if (!folder) throw new Error(`워크스페이스 밖의 파일은 구현 대상으로 사용할 수 없습니다: ${uri.fsPath}`);
+      const document = await vscode.workspace.openTextDocument(uri);
+      if (document.isDirty) throw new Error(`저장되지 않은 파일이 있습니다. 먼저 저장한 뒤 다시 실행하세요: ${document.fileName}`);
+      const text = document.getText();
+      const path = vscode.workspace.asRelativePath(uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1).replace(/\\/g, "/");
+      snapshots.push({
+        id: `F${String(index + 1).padStart(3, "0")}`,
+        path,
+        uri: uri.toString(),
+        snapshot: hashText(text),
+        languageId: document.languageId,
+        text,
+        lineCount: document.lineCount,
+      });
+    }
+    return snapshots;
   }
 
   async prepareAssistantChangeProposal(
@@ -780,49 +881,102 @@ function lineNumberAtOffset(content: string, offset: number): number {
   return line;
 }
 
-function changeBlocksToolDefinition(): ChatToolDefinition {
-  return {
-    type: "function",
-    function: {
-      name: "submitChangeBlocks",
-      description: "파일별 수정 코드 블록을 VS Code 변경 작업대에 제출합니다. 실제 파일을 저장하지 않습니다.",
-      parameters: {
-        type: "object",
-        properties: {
-          changes: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                path: { type: "string" },
-                description: { type: "string" },
-                languageId: { type: "string" },
-                originalText: { type: "string" },
-                proposedText: { type: "string" },
-                startLine: { type: "integer" },
-                endLine: { type: "integer" },
-              },
-              required: ["path", "proposedText"],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ["changes"],
-        additionalProperties: false,
-      },
-    },
-  };
+function finishPlanRun(content: string): AgentRunResult {
+  return { content: content.trim(), changeBlocks: [], sourceSnapshots: [], issues: [] };
 }
 
-function finishAgentRun(content: string, submittedBlocks: AiChangeBlock[], mode: AgentMode): AgentRunResult {
-  const changeBlocks = mode === "implement"
-    ? mergeChangeBlocks(submittedBlocks, extractChangeBlocks(content))
-    : [];
-  const trimmed = content.trim();
-  return {
-    content: trimmed || (changeBlocks.length > 0 ? `AI가 코드 변경 블록 ${changeBlocks.length}개를 제출했습니다.` : ""),
-    changeBlocks,
-  };
+const IMPLEMENT_INPUT_TOKEN_LIMIT = 150000;
+const IMPLEMENT_CHUNK_TOKEN_LIMIT = 120000;
+const IMPLEMENT_CHUNK_OVERLAP_LINES = 100;
+
+function buildImplementationBatches(snapshots: SourceSnapshot[], prompt: string, memory: string, summary: string): string[][] {
+  const fixedTokens = estimateTokens(prompt) + estimateTokens(memory) + estimateTokens(summary) + 5000;
+  const batchBudget = Math.max(20000, IMPLEMENT_INPUT_TOKEN_LIMIT - fixedTokens);
+  const unitBudget = Math.min(IMPLEMENT_CHUNK_TOKEN_LIMIT, batchBudget);
+  const units: string[] = [];
+  for (const snapshot of snapshots) {
+    const full = renderNumberedFile(snapshot);
+    if (estimateTokens(full) <= unitBudget) {
+      units.push(full);
+      continue;
+    }
+    const lines = snapshot.text.split(/\r\n|\r|\n/);
+    let start = 1;
+    while (start <= lines.length) {
+      let end = start;
+      let used = 0;
+      while (end <= lines.length) {
+        const next = estimateTokens(`${String(end).padStart(6, "0")}|${lines[end - 1]}\n`);
+        if (end === start && next > unitBudget) {
+          throw new Error(`${snapshot.path}의 ${end}번째 줄이 단독으로 구현 요청 토큰 한도를 초과합니다.`);
+        }
+        if (end > start && used + next > unitBudget) break;
+        used += next;
+        end++;
+      }
+      const last = Math.max(start, end - 1);
+      units.push(renderNumberedFile(snapshot, start, last));
+      if (last >= lines.length) break;
+      start = Math.max(start + 1, last - IMPLEMENT_CHUNK_OVERLAP_LINES + 1);
+    }
+  }
+
+  const batches: string[][] = [];
+  let current: string[] = [];
+  let currentTokens = 0;
+  for (const unit of units) {
+    const tokens = estimateTokens(unit);
+    if (current.length > 0 && currentTokens + tokens > batchBudget) {
+      batches.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(unit);
+    currentTokens += tokens;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+function implementationProtocolPrompt(protocolId: string): string {
+  return [
+    "당신은 VS Code 안에서 동작하는 사내 코드베이스 구현 AI입니다. 설명은 한국어로 작성하고 코드 식별자는 원문을 유지하세요.",
+    "제공된 CCA_FILE의 코드와 전역 줄 번호를 기준으로 사용자 요청을 구현하세요.",
+    "도구 호출, Markdown 코드 펜스, diff, JSON, originalText/proposedText 형식을 사용하지 마세요.",
+    "각 변경은 아래 형식을 정확히 지켜야 하며, 플래그 밖에는 짧은 설명만 쓸 수 있습니다.",
+    `모든 플래그의 프로토콜 ID는 ${protocolId}를 그대로 사용하세요.`,
+    "기존 파일 변경의 file과 snapshot은 CCA_FILE 헤더 값을 그대로 복사하세요.",
+    "startLine/endLine은 수정 전 원본의 전역 1-based 줄 번호입니다. replace는 양 끝 줄을 모두 포함합니다.",
+    "삽입은 insert_before 또는 insert_after를 사용하고 기준 줄 하나를 startLine/endLine에 동일하게 적으세요.",
+    "새 파일은 file=NEW, snapshot=NEW, operation=create_file, startLine=0, endLine=0, path=워크스페이스 상대 경로를 사용하세요.",
+    "CCA_CODE 플래그 안에는 설명, 인덱스, 경로, 코드 펜스를 넣지 말고 실제 저장할 코드만 넣으세요.",
+    "서로 겹치는 replace 범위를 만들지 마세요. 변경이 필요 없으면 변경 블록을 출력하지 마세요.",
+    "",
+    `<<<CCA_CHANGE_BEGIN:${protocolId}>>>`,
+    "id=C001",
+    "file=F001",
+    "snapshot=CCA_FILE의 snapshot 값",
+    "operation=replace",
+    "startLine=10",
+    "endLine=20",
+    `<<<CCA_DESCRIPTION_BEGIN:${protocolId}>>>`,
+    "변경 이유를 한국어 한두 문장으로 작성",
+    `<<<CCA_DESCRIPTION_END:${protocolId}>>>`,
+    `<<<CCA_CODE_BEGIN:${protocolId}>>>`,
+    "이 위치에는 10~20줄 전체를 대체할 실제 코드만 작성",
+    `<<<CCA_CODE_END:${protocolId}>>>`,
+    `<<<CCA_CHANGE_END:${protocolId}>>>`,
+  ].join("\n");
+}
+
+function deduplicateLineChanges(changes: AgentRunResult["changeBlocks"]): AgentRunResult["changeBlocks"] {
+  const seen = new Set<string>();
+  return changes.filter((change) => {
+    const key = [change.fileId, change.snapshot, change.operation, change.startLine, change.endLine, change.path ?? "", change.code].join("\u0000");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function hashText(content: string): string {

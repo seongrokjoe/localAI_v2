@@ -2,7 +2,7 @@
   "name": "company-code-ai",
   "displayName": "Company Code AI",
   "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,

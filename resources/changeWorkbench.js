@@ -42,7 +42,7 @@ function render() {
     button.addEventListener("click", () => vscode.postMessage({ type: "selectFile", fileId: file.id }));
     tabs.appendChild(button);
   }
-  const unmapped = state.blocks.filter((block) => !block.fileId);
+  const unmapped = state.blocks.filter((block) => !block.targetFileId);
   if (unmapped.length > 0) {
     const button = document.createElement("button");
     button.textContent = `대상 미지정 ${unmapped.length}`;
@@ -52,7 +52,7 @@ function render() {
   }
   compare.disabled = !activeFile;
   save.disabled = !activeFile || !activeFile.changed;
-  renderBlocks(activeFile ? state.blocks.filter((block) => block.fileId === activeFile.id) : unmapped);
+  renderBlocks(activeFile ? state.blocks.filter((block) => block.targetFileId === activeFile.id) : unmapped);
 }
 
 function renderBlocks(items) {
@@ -86,7 +86,7 @@ function blockCard(item) {
   title.className = "block-title";
   const description = document.createElement("div");
   description.className = "description";
-  description.textContent = item.description || item.pathHint || "AI 코드 제안";
+  description.textContent = item.description || item.path || "AI 코드 제안";
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.textContent = item.mappingLabel;
@@ -94,15 +94,15 @@ function blockCard(item) {
   head.append(checkbox, title);
 
   const code = document.createElement("pre");
-  code.textContent = item.proposedText;
+  code.textContent = item.code;
   code.tabIndex = 0;
 
   const actions = document.createElement("div");
   actions.className = "actions";
   actions.appendChild(actionButton("복사", "copyBlock", item.id));
-  if (!item.fileId) actions.appendChild(actionButton("대상 파일 선택", "chooseTarget", item.id));
-  if (item.fileId && item.mappingStatus !== "mapped") actions.appendChild(actionButton("선택 범위 연결", "mapSelection", item.id));
-  if (item.fileId) actions.appendChild(actionButton("오른쪽 파일 열기", "selectFile", undefined, item.fileId));
+  if (!item.targetFileId) actions.appendChild(actionButton("대상 파일 선택", "chooseTarget", item.id));
+  if (item.targetFileId && item.mappingStatus !== "mapped") actions.appendChild(actionButton("선택 범위 연결", "mapSelection", item.id));
+  if (item.targetFileId) actions.appendChild(actionButton("오른쪽 파일 열기", "selectFile", undefined, item.targetFileId));
   card.append(head, code, actions);
   return card;
 }

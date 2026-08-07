@@ -2,47 +2,80 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { extractChangeBlocks, parseChangeBlockArguments } = require("../dist/changeBlockParser.js");
+const { parseLineChangeResponse, renderNumberedFile } = require("../dist/lineChangeProtocol.js");
+const { lineOperationOffsets, replacementForLineChange } = require("../dist/lineChangeMapping.js");
 
-const toolBlocks = parseChangeBlockArguments(JSON.stringify({
-  changes: [{
-    path: "src/sample.cpp",
-    description: "메서드 수정",
-    originalText: "int value = 1;",
-    proposedText: "int value = 2;",
-  }],
-}));
-assert.equal(toolBlocks.length, 1);
-assert.equal(toolBlocks[0].pathHint, "src/sample.cpp");
-assert.equal(toolBlocks[0].source, "tool");
+const protocolId = "PABC123";
+const response = [
+  "변경 설명입니다.",
+  `<<<CCA_CHANGE_BEGIN:${protocolId}>>>`,
+  "id=C001",
+  "file=F001",
+  "snapshot=sha256-one",
+  "operation=replace",
+  "startLine=10",
+  "endLine=12",
+  `<<<CCA_DESCRIPTION_BEGIN:${protocolId}>>>`,
+  "메서드 반환값을 수정합니다.",
+  `<<<CCA_DESCRIPTION_END:${protocolId}>>>`,
+  `<<<CCA_CODE_BEGIN:${protocolId}>>>`,
+  "int value = 2;",
+  "return value;",
+  `<<<CCA_CODE_END:${protocolId}>>>`,
+  `<<<CCA_CHANGE_END:${protocolId}>>>`,
+  `<<<CCA_CHANGE_BEGIN:${protocolId}>>>`,
+  "id=C002",
+  "file=NEW",
+  "snapshot=NEW",
+  "operation=create_file",
+  "startLine=0",
+  "endLine=0",
+  "path=src/new-file.ts",
+  `<<<CCA_CODE_BEGIN:${protocolId}>>>`,
+  "export const created = true;",
+  `<<<CCA_CODE_END:${protocolId}>>>`,
+  `<<<CCA_CHANGE_END:${protocolId}>>>`,
+].join("\n");
 
-const jsonBlocks = extractChangeBlocks([
-  "```company-code-ai",
-  JSON.stringify({ changes: [{ filePath: "src/a.cs", before: "return 1;", after: "return 2;" }] }),
-  "```",
-].join("\n"));
-assert.equal(jsonBlocks.length, 1);
-assert.equal(jsonBlocks[0].originalText, "return 1;");
-assert.equal(jsonBlocks[0].proposedText, "return 2;");
+const parsed = parseLineChangeResponse(response, protocolId);
+assert.equal(parsed.issues.length, 0);
+assert.equal(parsed.changes.length, 2);
+assert.equal(parsed.changes[0].fileId, "F001");
+assert.equal(parsed.changes[0].startLine, 10);
+assert.equal(parsed.changes[0].code, "int value = 2;\nreturn value;");
+assert.equal(parsed.changes[1].operation, "create_file");
+assert.equal(parsed.changes[1].path, "src/new-file.ts");
 
-const pairedBlocks = extractChangeBlocks([
-  "### src/driver.cpp",
-  "원본:",
-  "```original",
-  "void run() {}",
-  "```",
-  "수정:",
-  "```replacement",
-  "void run() { start(); }",
-  "```",
-].join("\n"));
-assert.equal(pairedBlocks.length, 1);
-assert.equal(pairedBlocks[0].pathHint, "src/driver.cpp");
-assert.equal(pairedBlocks[0].originalText, "void run() {}");
+const wrongProtocol = parseLineChangeResponse(response, "POTHER");
+assert.equal(wrongProtocol.changes.length, 0);
+assert.match(wrongProtocol.issues[0], /protocolId/);
 
-const fallbackBlocks = extractChangeBlocks("파일: src/view.ts\n```ts\nexport const value = 2;\n```");
-assert.equal(fallbackBlocks.length, 1);
-assert.equal(fallbackBlocks[0].pathHint, "src/view.ts");
-assert.equal(fallbackBlocks[0].source, "markdown");
+const fallback = parseLineChangeResponse([
+  `<<<CCA_CODE_BEGIN:${protocolId}>>>`,
+  "onlyCode();",
+  `<<<CCA_CODE_END:${protocolId}>>>`,
+].join("\n"), protocolId);
+assert.equal(fallback.changes.length, 1);
+assert.equal(fallback.changes[0].code, "onlyCode();");
+assert.ok(fallback.changes[0].mappingError);
 
-console.log("Change block parser tests passed.");
+const numbered = renderNumberedFile({
+  id: "F007",
+  path: "src/sample.cpp",
+  snapshot: "hash",
+  text: "first\r\n\r\nthird",
+  lineCount: 3,
+}, 2, 3);
+assert.match(numbered, /startLine="2" endLine="3"/);
+assert.match(numbered, /000002\|\n000003\|third/);
+
+const crlfSource = "one\r\ntwo\r\nthree";
+assert.deepEqual(lineOperationOffsets(crlfSource, "replace", 2, 2), { start: 5, end: 10 });
+assert.deepEqual(lineOperationOffsets(crlfSource, "insert_before", 2, 2), { start: 5, end: 5 });
+assert.deepEqual(lineOperationOffsets(crlfSource, "insert_after", 2, 2), { start: 10, end: 10 });
+assert.equal(lineOperationOffsets(crlfSource, "replace", 4, 4), undefined);
+assert.equal(replacementForLineChange("replace", "TWO", "two\r\n", 5, crlfSource, "\r\n"), "TWO\r\n");
+assert.equal(replacementForLineChange("insert_before", "added", "", 5, crlfSource, "\r\n"), "added\r\n");
+assert.equal(replacementForLineChange("insert_after", "added", "", crlfSource.length, crlfSource, "\r\n"), "\r\nadded");
+
+console.log("Line change protocol tests passed.");

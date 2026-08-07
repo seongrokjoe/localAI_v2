@@ -47,9 +47,10 @@ onMessage({ data: { type: "state", state: {
   files: [{ id: "file-1", path: "src/a.cpp", draftPath: "draft/a.cpp", changed: true, saved: false, blockIds: ["block-1"] }],
   blocks: [{
     id: "block-1",
-    fileId: "file-1",
+    fileId: "F001",
+    targetFileId: "file-1",
     description: "수정",
-    proposedText: "int value = 2;",
+    code: "int value = 2;",
     mappingStatus: "mapped",
     mappingLabel: "src/a.cpp: 연결됨",
     selected: false,
