@@ -13,6 +13,12 @@ interface WebviewMessage {
   mode?: AgentMode;
 }
 
+interface SendOptions {
+  displayText?: string;
+  statusText?: string;
+  phaseText?: string;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortController?: AbortController;
@@ -156,7 +162,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await this.modeManager.set("implement");
-    await this.send(`승인된 아래 계획을 구현해줘. 변경 범위는 최소화하고, 패치를 적용하기 전에 파일 변경 승인을 요청해줘. 설명은 한국어로 작성해줘.\n\n${trimmed}`);
+    await this.send(
+      `승인된 아래 계획을 구현해줘. 변경 범위는 최소화하고, 패치를 적용하기 전에 파일 변경 승인을 요청해줘. 설명은 한국어로 작성해줘.\n\n${trimmed}`,
+      {
+        displayText: "선택한 계획 구현을 시작합니다.",
+        phaseText: "계획 구현 중",
+        statusText: "계획 구현 중",
+      },
+    );
   }
 
   private async applyLastChangeProposal(): Promise<void> {
@@ -169,7 +182,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    this.view?.webview.postMessage({ type: "assistantStart" });
+    this.view?.webview.postMessage({ type: "assistantStart", text: "변경안 분석 중" });
     this.view?.webview.postMessage({ type: "status", text: "변경안 분석 중" });
 
     this.abortController = new AbortController();
@@ -185,6 +198,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           memory: this.sessionStore.memoryContext(),
         },
         (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
+        async (status) => {
+          await this.view?.webview.postMessage({ type: "status", text: status });
+        },
         this.abortController.signal,
       );
       await this.sessionStore.recordTurn("assistant", response);
@@ -199,7 +215,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async send(text: string): Promise<void> {
+  private async send(text: string, options: SendOptions = {}): Promise<void> {
     const prompt = text.trim();
     if (!prompt) {
       return;
@@ -218,9 +234,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    this.view?.webview.postMessage({ type: "user", text: prompt });
-    this.view?.webview.postMessage({ type: "assistantStart" });
-    this.view?.webview.postMessage({ type: "status", text: "실행 중" });
+    this.view?.webview.postMessage({ type: "user", text: options.displayText ?? prompt });
+    this.view?.webview.postMessage({ type: "assistantStart", text: options.phaseText ?? "실행 중" });
+    this.view?.webview.postMessage({ type: "status", text: options.statusText ?? "실행 중" });
 
     this.abortController = new AbortController();
     try {
@@ -365,6 +381,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       border-color: var(--vscode-errorForeground);
       color: var(--vscode-errorForeground);
     }
+    .message.working {
+      opacity: 0.78;
+    }
     .plan-actions {
       display: flex;
       flex-wrap: wrap;
@@ -433,6 +452,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const planMode = document.getElementById('planMode');
     const implementMode = document.getElementById('implementMode');
     let currentAssistant;
+    let assistantBuffer = '';
+    let timerId;
+    let activeStartedAt = 0;
+    let activePhase = '실행 중';
     let lastPlan = '';
 
     document.getElementById('send').addEventListener('click', send);
@@ -456,19 +479,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'context') renderContext(message.items ?? []);
       if (message.type === 'state') renderState(message);
       if (message.type === 'setInput') input.value = message.text ?? '';
-      if (message.type === 'status') status.textContent = message.text;
+      if (message.type === 'status') setStatus(message.text);
       if (message.type === 'user') appendMessage('user', message.text);
-      if (message.type === 'assistantStart') currentAssistant = appendMessage('assistant', '');
+      if (message.type === 'assistantStart') startAssistant(message.text ?? '실행 중');
       if (message.type === 'assistantDelta' && currentAssistant) {
-        currentAssistant.textContent += message.text;
-        messages.scrollTop = messages.scrollHeight;
+        assistantBuffer += message.text ?? '';
       }
-      if (message.type === 'assistantDone') currentAssistant = undefined;
+      if (message.type === 'assistantDone') finishAssistant();
       if (message.type === 'planActions') renderPlanActions(message.text ?? '');
       if (message.type === 'changeActions') renderChangeActions();
       if (message.type === 'assistantError') {
+        stopTimer();
         if (currentAssistant) currentAssistant.remove();
         currentAssistant = undefined;
+        assistantBuffer = '';
         appendMessage('error', message.text);
       }
     });
@@ -489,17 +513,79 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return element;
     }
 
+    function startAssistant(phase) {
+      stopTimer();
+      assistantBuffer = '';
+      currentAssistant = appendMessage('assistant working', '');
+      startTimer(phase);
+    }
+
+    function finishAssistant() {
+      stopTimer();
+      if (currentAssistant) {
+        currentAssistant.classList.remove('working');
+        currentAssistant.textContent = assistantBuffer.trimEnd() || '완료되었습니다.';
+        messages.scrollTop = messages.scrollHeight;
+      }
+      currentAssistant = undefined;
+      assistantBuffer = '';
+    }
+
+    function setStatus(text) {
+      if (timerId && text && text !== '준비' && text !== '오류') {
+        activePhase = text;
+        renderTimer();
+        return;
+      }
+      status.textContent = text ?? '';
+    }
+
+    function startTimer(phase) {
+      activePhase = phase || '실행 중';
+      activeStartedAt = Date.now();
+      timerId = window.setInterval(renderTimer, 1000);
+      renderTimer();
+    }
+
+    function stopTimer() {
+      if (timerId) {
+        window.clearInterval(timerId);
+        timerId = undefined;
+      }
+    }
+
+    function renderTimer() {
+      const elapsedSeconds = Math.floor((Date.now() - activeStartedAt) / 1000);
+      const elapsed = formatElapsed(elapsedSeconds);
+      const text = activePhase + ' ' + elapsed;
+      status.textContent = text;
+      if (currentAssistant) {
+        currentAssistant.textContent = text;
+        messages.scrollTop = messages.scrollHeight;
+      }
+    }
+
+    function formatElapsed(totalSeconds) {
+      const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+      const seconds = (totalSeconds % 60).toString().padStart(2, '0');
+      return minutes + ':' + seconds;
+    }
+
     function renderState(state) {
       planMode.classList.toggle('active', state.mode === 'plan');
       implementMode.classList.toggle('active', state.mode === 'implement');
       const scope = state.activeScope ? ' - ' + state.activeScope : '';
+      if (timerId) return;
       status.textContent = (state.mode === 'implement' ? '구현' : '계획') + scope;
     }
 
     function renderChangeActions() {
       const actions = document.createElement('div');
       actions.className = 'plan-actions';
-      const apply = actionButton('변경안 적용', () => vscode.postMessage({ type: 'applyLastChangeProposal' }));
+      const apply = actionButton('변경안 적용', () => {
+        actions.remove();
+        vscode.postMessage({ type: 'applyLastChangeProposal' });
+      });
       const discard = actionButton('버리기', () => actions.remove());
       actions.append(apply, discard);
       messages.appendChild(actions);
@@ -510,8 +596,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       lastPlan = planText;
       const actions = document.createElement('div');
       actions.className = 'plan-actions';
-      const implement = actionButton('계획 구현', () => vscode.postMessage({ type: 'implementPlan', text: lastPlan }));
-      const refine = actionButton('계획 다듬기', () => vscode.postMessage({ type: 'refinePlan', text: lastPlan }));
+      const implement = actionButton('계획 구현', () => {
+        actions.remove();
+        vscode.postMessage({ type: 'implementPlan', text: lastPlan });
+      });
+      const refine = actionButton('계획 다듬기', () => {
+        actions.remove();
+        vscode.postMessage({ type: 'refinePlan', text: lastPlan });
+      });
       const discard = actionButton('버리기', () => actions.remove());
       const remember = actionButton('기억하기', () => vscode.postMessage({ type: 'remember', text: lastPlan }));
       const clear = actionButton('컨텍스트 비우기', () => vscode.postMessage({ type: 'clearContext' }));

@@ -127,9 +127,11 @@ export class CodeAgent {
     config: RuntimeConfig,
     options: AgentRunOptions,
     onDelta: (text: string) => void,
+    onStatus?: (text: string) => void | Promise<void>,
     signal?: AbortSignal,
   ): Promise<string> {
     this.lastRunAppliedWorkspaceChange = false;
+    await onStatus?.("변경안 분석 중");
     const contextPack = await this.buildContextPack(originalPrompt, contextItems, config.maxContextTokens, options);
     const proposal = await this.createPatchProposal(originalPrompt, assistantResponse, contextPack, config, signal);
     const changes = proposal.changes ?? [];
@@ -149,6 +151,7 @@ export class CodeAgent {
       return message;
     }
 
+    await onStatus?.("파일 변경 승인 대기 중");
     const result = await this.tools.applyPatchAfterUserApproval({ changes }, "implement");
     this.lastRunAppliedWorkspaceChange = result.includes("패치를 적용했습니다.");
     const response = [proposal.message?.trim(), result].filter(Boolean).join("\n\n");

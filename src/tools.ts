@@ -7,6 +7,12 @@ import { assertSafePathSegment } from "./security";
 
 const excludeGlob = "**/{.git,node_modules,dist,out,build,.company-code-ai,.vscode-test}/**";
 
+interface TextFileState {
+  exists: boolean;
+  text: string;
+  eol: string;
+}
+
 export class WorkspaceTools {
   private activeScope?: string;
 
@@ -172,8 +178,8 @@ export class WorkspaceTools {
 
   async readFile(relativePath: string, maxChars = 40000): Promise<string> {
     const uri = this.resolveWorkspacePath(relativePath);
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    const text = Buffer.from(bytes).toString("utf8");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const text = document.getText();
     if (text.length <= maxChars) {
       return text;
     }
@@ -278,19 +284,15 @@ export class WorkspaceTools {
     for (const change of changes) {
       const relativePath = String(change.path ?? "");
       const uri = this.resolveWorkspacePath(relativePath);
-      let current = "";
-      let exists = true;
-      try {
-        current = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
-      } catch {
-        exists = false;
-      }
+      const state = await readTextFileState(uri);
+      const current = state.text;
+      const exists = state.exists;
 
       if (typeof change.fullContent === "string") {
         if (!exists && !change.createIfMissing) {
           throw new Error(`${relativePath} 파일이 없습니다. 새로 만들려면 createIfMissing을 true로 설정하세요.`);
         }
-        const after = exists ? adaptLineEndings(change.fullContent, current) : change.fullContent;
+        const after = exists ? adaptLineEndings(change.fullContent, state.eol) : change.fullContent;
         replaceWholeDocument(edit, uri, exists ? current : "", after);
         snapshots.push({ path: relativePath, before: exists ? current : "", after, description: change.description });
         continue;
@@ -300,11 +302,11 @@ export class WorkspaceTools {
         if (!exists) {
           throw new Error(`${relativePath} 파일이 없습니다.`);
         }
-        const original = findOriginalText(current, change.originalText);
+        const original = findOriginalText(current, change.originalText, state.eol);
         if (original === undefined) {
           throw new Error(`${relativePath}에서 originalText를 찾지 못했습니다.`);
         }
-        const replacement = adaptLineEndings(change.replacementText, current);
+        const replacement = adaptLineEndings(change.replacementText, state.eol);
         const next = current.replace(original, replacement);
         replaceWholeDocument(edit, uri, current, next);
         snapshots.push({ path: relativePath, before: current, after: next, description: change.description });
@@ -392,23 +394,29 @@ function replaceWholeDocument(edit: vscode.WorkspaceEdit, uri: vscode.Uri, curre
   edit.replace(uri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(lineCount, 0)), next);
 }
 
-function findOriginalText(current: string, originalText: string): string | undefined {
+async function readTextFileState(uri: vscode.Uri): Promise<TextFileState> {
+  try {
+    const document = await vscode.workspace.openTextDocument(uri);
+    return { exists: true, text: document.getText(), eol: documentLineEnding(document) };
+  } catch {
+    return { exists: false, text: "", eol: "\n" };
+  }
+}
+
+function documentLineEnding(document: vscode.TextDocument): string {
+  return document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
+}
+
+function findOriginalText(current: string, originalText: string, eol: string): string | undefined {
   if (current.includes(originalText)) {
     return originalText;
   }
-  const eolAdjusted = adaptLineEndings(originalText, current);
+  const eolAdjusted = adaptLineEndings(originalText, eol);
   return current.includes(eolAdjusted) ? eolAdjusted : undefined;
 }
 
-function adaptLineEndings(text: string, reference: string): string {
-  const eol = dominantLineEnding(reference);
+function adaptLineEndings(text: string, eol: string): string {
   return text.replace(/\r\n|\r|\n/g, eol);
-}
-
-function dominantLineEnding(text: string): string {
-  const crlf = text.match(/\r\n/g)?.length ?? 0;
-  const lf = text.match(/(?<!\r)\n/g)?.length ?? 0;
-  return crlf > lf ? "\r\n" : "\n";
 }
 
 function lineNumberAt(content: string, index: number): number {
