@@ -2,7 +2,9 @@ import * as vscode from "vscode";
 import { createHash } from "node:crypto";
 import {
   AgentMode,
+  AgentRunResult,
   AgentRunOptions,
+  AiChangeBlock,
   AssistantPatchApplyResult,
   ContextItem,
   ChatMessage,
@@ -21,6 +23,7 @@ import { formatPatchApplyOutcome, WorkspaceTools } from "./tools";
 import { parsePatchResponse, parseTargetResponse } from "./patchProtocol";
 import { isLineRangeChange } from "./patchText";
 import { extractReplacementContent } from "./proposalText";
+import { extractChangeBlocks, mergeChangeBlocks, parseChangeBlockArguments } from "./changeBlockParser";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -44,7 +47,10 @@ const modePrompts: Record<AgentMode, string> = {
     "승인된 계획 또는 사용자 요청에 맞는 구체적인 변경 내용을 작성하세요.",
     "승인된 계획 또는 사용자의 직접 요청 범위 안에서만 좁게 수정하세요.",
     "채팅 텍스트로 '패치를 적용하시겠습니까?', '예/아니오' 같은 승인 질문을 출력하지 마세요.",
-    "파일을 수정했다고 단정하지 말고 대상 파일 경로와 변경할 코드의 의도를 명확히 설명하세요. 확장이 별도로 검증된 패치를 만들고 승인을 요청합니다.",
+    "파일을 수정했다고 단정하지 말고 대상 파일 경로와 변경할 코드의 의도를 명확히 설명하세요.",
+    "수정 코드가 있으면 가능할 때 submitChangeBlocks 도구로 파일별 코드 블록을 제출하세요.",
+    "각 블록에는 실제 파일 경로, 교체할 기존 원문(originalText), 수정 코드(proposedText), 짧은 설명을 포함하세요.",
+    "도구를 사용할 수 없으면 파일 경로를 제목에 적고 수정 코드를 Markdown 코드 블록으로 제시하세요.",
   ].join("\n"),
 };
 
@@ -153,7 +159,7 @@ export class CodeAgent {
     options: AgentRunOptions,
     onDelta: (text: string) => void,
     signal?: AbortSignal,
-  ): Promise<string> {
+  ): Promise<AgentRunResult> {
     this.lastRunAppliedWorkspaceChange = false;
     const contextPack = await this.buildContextPack(prompt, contextItems, config.maxContextTokens, options);
     const messages: ChatMessage[] = [
@@ -171,14 +177,19 @@ export class CodeAgent {
 
     const client = new LlmClient(config);
     let accumulated = "";
+    let submittedBlocks: AiChangeBlock[] = [];
     const toolMode = config.toolCallMode;
     const useNativeTools = toolMode === "native" || toolMode === "auto";
     const useJsonTools = toolMode === "json" || toolMode === "auto";
 
     for (let step = 0; step < 4; step++) {
+      const nativeDefinitions = this.tools.definitionsForMode(options.mode, false);
+      if (options.mode === "implement") {
+        nativeDefinitions.push(changeBlocksToolDefinition());
+      }
       const result = await client.complete({
         messages,
-        tools: useNativeTools ? this.tools.definitionsForMode(options.mode, false) : undefined,
+        tools: useNativeTools ? nativeDefinitions : undefined,
         signal,
         onDelta: (text) => {
           accumulated += text;
@@ -188,7 +199,7 @@ export class CodeAgent {
 
       const toolCalls = result.toolCalls.length > 0 ? result.toolCalls : useJsonTools ? parseJsonEnvelope(result.content) : [];
       if (toolCalls.length === 0) {
-        return accumulated;
+        return finishAgentRun(accumulated, submittedBlocks, options.mode);
       }
 
       messages.push({
@@ -198,10 +209,18 @@ export class CodeAgent {
       });
 
       for (const toolCall of toolCalls) {
-        const toolResult =
-          toolCall.function.name === "applyPatchAfterUserApproval"
+        let toolResult: string;
+        if (toolCall.function.name === "submitChangeBlocks" && options.mode === "implement") {
+          const parsed = parseChangeBlockArguments(toolCall.function.arguments);
+          submittedBlocks = mergeChangeBlocks(submittedBlocks, parsed);
+          toolResult = parsed.length > 0
+            ? `${parsed.length}개 코드 변경 블록을 로컬 변경 작업대에 등록했습니다.`
+            : "변경 블록 형식을 읽지 못했습니다. 경로와 proposedText를 확인하세요.";
+        } else {
+          toolResult = toolCall.function.name === "applyPatchAfterUserApproval"
             ? "파일 변경은 검증된 패치를 만든 뒤 확장 승인 UI에서 처리합니다. 지금은 변경 내용을 설명하세요."
             : await this.executeToolCall(toolCall, options.mode);
+        }
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id || toolCall.function.name,
@@ -210,7 +229,7 @@ export class CodeAgent {
       }
     }
 
-    return accumulated;
+    return finishAgentRun(accumulated, submittedBlocks, options.mode);
   }
 
   async prepareAssistantChangeProposal(
@@ -759,6 +778,51 @@ function lineNumberAtOffset(content: string, offset: number): number {
     }
   }
   return line;
+}
+
+function changeBlocksToolDefinition(): ChatToolDefinition {
+  return {
+    type: "function",
+    function: {
+      name: "submitChangeBlocks",
+      description: "파일별 수정 코드 블록을 VS Code 변경 작업대에 제출합니다. 실제 파일을 저장하지 않습니다.",
+      parameters: {
+        type: "object",
+        properties: {
+          changes: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                description: { type: "string" },
+                languageId: { type: "string" },
+                originalText: { type: "string" },
+                proposedText: { type: "string" },
+                startLine: { type: "integer" },
+                endLine: { type: "integer" },
+              },
+              required: ["path", "proposedText"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["changes"],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+function finishAgentRun(content: string, submittedBlocks: AiChangeBlock[], mode: AgentMode): AgentRunResult {
+  const changeBlocks = mode === "implement"
+    ? mergeChangeBlocks(submittedBlocks, extractChangeBlocks(content))
+    : [];
+  const trimmed = content.trim();
+  return {
+    content: trimmed || (changeBlocks.length > 0 ? `AI가 코드 변경 블록 ${changeBlocks.length}개를 제출했습니다.` : ""),
+    changeBlocks,
+  };
 }
 
 function hashText(content: string): string {

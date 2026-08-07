@@ -49,8 +49,8 @@ window.addEventListener("message", (event) => {
   if (message.type === "planActions") renderPlanActions(message.text ?? "");
   if (message.type === "changeActions") renderChangeActions(message.text);
   if (message.type === "clearChangeActions") clearChangeActions();
-  if (message.type === "proposalOffer") renderProposalOffer();
-  if (message.type === "proposalState") renderProposalState(message.state);
+  if (message.type === "workbenchOffer") renderWorkbenchOffer();
+  if (message.type === "workbenchState") renderWorkbenchState(message.state);
   if (message.type === "assistantError") {
     stopTimer();
     if (currentAssistant) currentAssistant.remove();
@@ -175,18 +175,18 @@ function renderChangeActions(text) {
   scrollMessagesToBottom(shouldFollow);
 }
 
-function renderProposalOffer() {
+function renderWorkbenchOffer() {
   const shouldFollow = isNearMessagesBottom();
   clearChangeActions();
   activeChangeQuestion = appendMessage(
     "assistant",
-    "원본 파일은 아직 변경되지 않았습니다. 수정할 파일과 코드 범위를 선택해 편집 가능한 AI 작업본을 만드세요.",
+    "응답에서 코드 블록을 자동으로 찾지 못했습니다. 수동 변경 작업대를 열 수 있습니다.",
     shouldFollow,
   );
   const actions = document.createElement("div");
   actions.className = "plan-actions";
   actions.append(
-    actionButton("AI 작업본 만들기", () => vscode.postMessage({ type: "createProposal" })),
+    actionButton("빈 변경 작업대 열기", () => vscode.postMessage({ type: "createManualWorkbench" })),
     actionButton("응답만 유지", () => clearChangeActions()),
   );
   messages.appendChild(actions);
@@ -194,34 +194,25 @@ function renderProposalOffer() {
   scrollMessagesToBottom(shouldFollow);
 }
 
-function renderProposalState(state) {
+function renderWorkbenchState(state) {
   if (!state) {
     clearChangeActions();
     return;
   }
   const shouldFollow = isNearMessagesBottom();
   clearChangeActions();
-  const unresolved = (state.files ?? []).reduce((total, file) => total + (file.unresolvedConflicts ?? 0), 0);
-  const files = (state.files ?? [])
-    .map((file) => file.path + " (남은 conflict " + file.unresolvedConflicts + "개)")
-    .join("\n");
+  const mapped = (state.blocks ?? []).filter((block) => block.mappingStatus === "mapped").length;
+  const changed = (state.files ?? []).filter((file) => file.changed).length;
+  const summary = `AI 블록 ${state.blocks?.length ?? 0}개 · 매핑 ${mapped}개 · 변경 파일 ${changed}개`;
   activeChangeQuestion = appendMessage(
     "assistant",
-    [state.message, files, "작업본의 conflict를 해결한 뒤 완성본을 검토하고 원본에 저장하세요."]
-      .filter(Boolean)
-      .join("\n\n"),
+    [state.message, summary].filter(Boolean).join("\n\n"),
     shouldFollow,
   );
   const actions = document.createElement("div");
   actions.className = "plan-actions";
-  actions.appendChild(actionButton("작업본 열기", () => vscode.postMessage({ type: "openProposal" })));
-  if (unresolved === 0) {
-    actions.appendChild(actionButton("완성본 검토", () => vscode.postMessage({ type: "reviewProposal" })));
-    if (state.status === "reviewed") {
-      actions.appendChild(actionButton("원본에 저장", () => vscode.postMessage({ type: "applyProposal" })));
-    }
-  }
-  actions.appendChild(actionButton("작업본 버리기", () => vscode.postMessage({ type: "discardProposal" })));
+  actions.appendChild(actionButton("변경 작업대 열기", () => vscode.postMessage({ type: "openWorkbench" })));
+  actions.appendChild(actionButton("작업대 버리기", () => vscode.postMessage({ type: "discardWorkbench" })));
   messages.appendChild(actions);
   activeChangeActions = actions;
   scrollMessagesToBottom(shouldFollow);

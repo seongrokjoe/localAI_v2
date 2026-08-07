@@ -106,6 +106,50 @@ export interface AgentRunOptions {
   memory: AgentMemoryContext;
 }
 
+export interface AiChangeBlock {
+  id: string;
+  pathHint?: string;
+  languageId?: string;
+  description?: string;
+  originalText?: string;
+  proposedText: string;
+  startLine?: number;
+  endLine?: number;
+  source: "tool" | "json" | "markdown" | "manual";
+}
+
+export interface AgentRunResult {
+  content: string;
+  changeBlocks: AiChangeBlock[];
+}
+
+export type WorkbenchMappingStatus = "mapped" | "needs-file" | "needs-range" | "stale";
+
+export interface ChangeWorkbenchBlockState extends AiChangeBlock {
+  fileId?: string;
+  mappingStatus: WorkbenchMappingStatus;
+  mappingLabel: string;
+  selected: boolean;
+  manuallyEdited: boolean;
+}
+
+export interface ChangeWorkbenchFileState {
+  id: string;
+  path: string;
+  draftPath: string;
+  changed: boolean;
+  saved: boolean;
+  blockIds: string[];
+}
+
+export interface ChangeWorkbenchState {
+  id: string;
+  activeFileId?: string;
+  message: string;
+  files: ChangeWorkbenchFileState[];
+  blocks: ChangeWorkbenchBlockState[];
+}
+
 export interface FileSnapshotChange {
   path: string;
   before: string;

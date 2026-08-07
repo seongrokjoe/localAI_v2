@@ -141,19 +141,20 @@ const onMessage = windowListeners.get("message");
 assert.ok(onMessage, "window message listener must be registered");
 onMessage({ data: { type: "planActions", text: "계획 내용" } });
 clickCreatedButton("계획 구현");
-onMessage({ data: { type: "proposalOffer" } });
-clickCreatedButton("AI 작업본 만들기");
+onMessage({ data: { type: "workbenchOffer" } });
+clickCreatedButton("빈 변경 작업대 열기");
 onMessage({
   data: {
-    type: "proposalState",
+    type: "workbenchState",
     state: {
-      status: "reviewed",
-      message: "검토 완료",
-      files: [{ path: "src/sample.cpp", unresolvedConflicts: 0 }],
+      id: "session-1",
+      message: "작업대 준비",
+      files: [{ id: "file-1", path: "src/sample.cpp", changed: true }],
+      blocks: [{ id: "block-1", mappingStatus: "mapped" }],
     },
   },
 });
-clickCreatedButton("원본에 저장");
+clickCreatedButton("변경 작업대 열기");
 
 assert.deepEqual(
   JSON.parse(JSON.stringify(postedMessages)),
@@ -168,8 +169,8 @@ assert.deepEqual(
     { type: "stop" },
     { type: "send", text: "테스트 요청" },
     { type: "implementPlan", text: "계획 내용" },
-    { type: "createProposal" },
-    { type: "applyProposal" },
+    { type: "createManualWorkbench" },
+    { type: "openWorkbench" },
   ],
   "webview controls must post the expected extension messages",
 );

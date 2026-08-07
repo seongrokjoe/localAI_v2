@@ -4,9 +4,8 @@ import { readRuntimeConfig, secretTokenKey, updateSetting } from "./config";
 import { ContextManager } from "./context";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
-import { AgentMode, ProposalSessionState } from "./types";
-import { ProposalManager } from "./proposalManager";
-import { formatPatchApplyOutcome } from "./tools";
+import { AgentMode, AiChangeBlock, ChangeWorkbenchState } from "./types";
+import { ChangeWorkbenchManager } from "./changeWorkbench";
 
 interface WebviewMessage {
   type: string;
@@ -24,7 +23,7 @@ interface SendOptions {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortController?: AbortController;
-  private lastImplementation?: { prompt: string; response: string };
+  private lastImplementation?: { prompt: string; response: string; blocks: AiChangeBlock[] };
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -33,11 +32,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly modeManager: ModeManager,
     private readonly sessionStore: SessionStore,
     private readonly agent: CodeAgent,
-    private readonly proposalManager: ProposalManager,
+    private readonly changeWorkbench: ChangeWorkbenchManager,
   ) {
     this.contextManager.onDidChange(() => this.postContext());
     this.modeManager.onDidChange(() => this.postState());
-    this.proposalManager.onDidChangeState((state) => this.postProposalState(state));
+    this.changeWorkbench.onDidChangeState((state) => this.postWorkbenchState(state));
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -50,7 +49,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => this.handleMessage(message));
     this.postContext();
     this.postState();
-    void this.proposalManager.currentState().then((state) => this.postProposalState(state));
+    void this.changeWorkbench.currentState().then((state) => this.postWorkbenchState(state));
   }
 
   async reveal(): Promise<void> {
@@ -109,20 +108,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "implementPlan":
         await this.implementPlan(message.text ?? "");
         break;
-      case "createProposal":
-        await this.createProposal();
+      case "openWorkbench":
+        await this.runWorkbenchAction(() => this.changeWorkbench.open());
         break;
-      case "openProposal":
-        await this.runProposalAction(() => this.proposalManager.openDraft());
+      case "createManualWorkbench":
+        await this.createManualWorkbench();
         break;
-      case "reviewProposal":
-        await this.runProposalAction(() => this.proposalManager.openFinalDiff());
-        break;
-      case "applyProposal":
-        await this.applyProposal();
-        break;
-      case "discardProposal":
-        await this.runProposalAction(() => this.proposalManager.discard());
+      case "discardWorkbench":
+        await this.runWorkbenchAction(() => this.changeWorkbench.discard());
         break;
       case "refinePlan":
         this.view?.webview.postMessage({ type: "setInput", text: `이 계획을 더 구체화해줘:\n\n${message.text ?? ""}` });
@@ -189,63 +182,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  private async createProposal(): Promise<void> {
+  private async createManualWorkbench(): Promise<void> {
     if (!this.lastImplementation) {
-      vscode.window.showWarningMessage("AI 작업본으로 만들 최근 구현 응답이 없습니다.");
+      vscode.window.showWarningMessage("변경 작업대로 만들 최근 구현 응답이 없습니다.");
       return;
     }
-    if (this.abortController) {
-      vscode.window.showWarningMessage("Company Code AI 요청이 이미 실행 중입니다.");
-      return;
-    }
-    this.view?.webview.postMessage({ type: "assistantStart", text: "AI 작업본 준비 중" });
-    this.view?.webview.postMessage({ type: "status", text: "AI 작업본 준비 중" });
-    this.abortController = new AbortController();
-    try {
-      const config = await readRuntimeConfig(this.secrets);
-      const state = await this.proposalManager.create(
-        this.lastImplementation.prompt,
-        this.lastImplementation.response,
+    const implementation = this.lastImplementation;
+    await this.runWorkbenchAction(async () => {
+      const state = await this.changeWorkbench.createManual(
+        implementation.prompt,
+        implementation.response,
         this.contextManager.list(),
-        config,
-        async (status) => {
-          await this.view?.webview.postMessage({ type: "status", text: status });
-        },
-        this.abortController.signal,
       );
-      this.view?.webview.postMessage({ type: "assistantReplace", text: "AI 작업본을 만들었습니다. 편집기에서 conflict를 해결하고 완성본을 검토하세요." });
-      this.view?.webview.postMessage({ type: "assistantDone" });
-      this.postProposalState(state);
-      this.view?.webview.postMessage({ type: "status", text: "작업본 편집 중" });
-    } catch (error) {
-      this.view?.webview.postMessage({ type: "assistantError", text: error instanceof Error ? error.message : String(error) });
-      this.view?.webview.postMessage({ type: "status", text: "작업본 생성 실패" });
-    } finally {
-      this.abortController = undefined;
-    }
-  }
-
-  private async applyProposal(): Promise<void> {
-    await this.runProposalAction(async () => {
-      const outcome = await this.proposalManager.apply();
-      this.view?.webview.postMessage({ type: "assistant", text: formatPatchApplyOutcome(outcome) });
-      this.view?.webview.postMessage({ type: "status", text: outcome.status === "applied" ? "파일 변경 완료" : "파일 미변경" });
+      this.postWorkbenchState(state);
+      this.view?.webview.postMessage({ type: "status", text: "변경 작업대 편집 중" });
     });
   }
 
-  private async runProposalAction(action: () => Promise<void>): Promise<void> {
+  private async runWorkbenchAction(action: () => Promise<void>): Promise<void> {
     try {
       await action();
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       vscode.window.showErrorMessage(text);
       this.view?.webview.postMessage({ type: "assistant", text });
-      this.view?.webview.postMessage({ type: "status", text: "작업본 오류" });
+      this.view?.webview.postMessage({ type: "status", text: "변경 작업대 오류" });
     }
   }
 
-  private postProposalState(state: ProposalSessionState | undefined): void {
-    this.view?.webview.postMessage({ type: "proposalState", state });
+  private postWorkbenchState(state: ChangeWorkbenchState | undefined): void {
+    this.view?.webview.postMessage({ type: "workbenchState", state });
   }
 
   private async send(text: string, options: SendOptions = {}): Promise<void> {
@@ -275,7 +241,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const config = await readRuntimeConfig(this.secrets);
       await this.sessionStore.recordTurn("user", prompt);
-      const response = await this.agent.run(
+      const result = await this.agent.run(
         prompt,
         this.contextManager.list(),
         config,
@@ -286,10 +252,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         (delta) => this.view?.webview.postMessage({ type: "assistantDelta", text: delta }),
         this.abortController.signal,
       );
-      const displayResponse =
-        this.modeManager.current === "implement" && response.trim() && !this.agent.lastRunAppliedChange
-          ? stripTrailingPatchApprovalPrompt(response)
-          : response;
+      const response = result.content;
+      const displayResponse = this.modeManager.current === "implement" && response.trim()
+        ? stripTrailingPatchApprovalPrompt(response)
+        : response;
       this.view?.webview.postMessage({ type: "assistantReplace", text: displayResponse });
       await this.sessionStore.recordTurn("assistant", displayResponse);
       this.view?.webview.postMessage({ type: "assistantDone" });
@@ -297,9 +263,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: "planActions", text: response });
       }
       if (this.modeManager.current === "implement" && displayResponse.trim() && !this.agent.lastRunAppliedChange) {
-        this.lastImplementation = { prompt, response: displayResponse };
-        this.view?.webview.postMessage({ type: "proposalOffer" });
-        this.view?.webview.postMessage({ type: "status", text: "AI 작업본 생성 대기" });
+        this.lastImplementation = { prompt, response: displayResponse, blocks: result.changeBlocks };
+        if (result.changeBlocks.length > 0) {
+          this.view?.webview.postMessage({ type: "status", text: "변경 작업대 여는 중" });
+          const state = await this.changeWorkbench.create(prompt, displayResponse, result.changeBlocks, this.contextManager.list());
+          this.postWorkbenchState(state);
+          this.view?.webview.postMessage({ type: "assistant", text: `코드 변경 블록 ${result.changeBlocks.length}개를 변경 작업대에 열었습니다.` });
+          this.view?.webview.postMessage({ type: "status", text: "변경 작업대 편집 중" });
+        } else {
+          this.view?.webview.postMessage({ type: "workbenchOffer" });
+          this.view?.webview.postMessage({ type: "status", text: "코드 블록 없음" });
+        }
       } else {
         this.view?.webview.postMessage({ type: "status", text: "준비" });
       }

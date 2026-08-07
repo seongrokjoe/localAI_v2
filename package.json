@@ -2,7 +2,7 @@
   "name": "company-code-ai",
   "displayName": "Company Code AI",
   "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,
@@ -19,6 +19,7 @@
   "activationEvents": [
     "onView:companyCodeAI.chatView",
     "onCommand:companyCodeAI.openChat",
+    "onCommand:companyCodeAI.openChangeWorkbench",
     "onCommand:companyCodeAI.setPlanMode",
     "onCommand:companyCodeAI.setImplementMode",
     "onCommand:companyCodeAI.toggleMode",
@@ -62,6 +63,10 @@
       {
         "command": "companyCodeAI.openChat",
         "title": "Company Code AI: 채팅 열기"
+      },
+      {
+        "command": "companyCodeAI.openChangeWorkbench",
+        "title": "Company Code AI: 변경 작업대 열기"
       },
       {
         "command": "companyCodeAI.setPlanMode",
@@ -239,7 +244,8 @@
     "test:patch": "npm run compile && node scripts/test-patch-protocol.mjs",
     "test:proposal": "npm run compile && node scripts/test-proposal-text.mjs",
     "test:webview": "node scripts/test-webview.mjs",
-    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-webview.mjs",
+    "test:workbench": "npm run compile && node scripts/test-change-blocks.mjs && node scripts/test-change-workbench-webview.mjs",
+    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",

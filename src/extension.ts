@@ -8,7 +8,7 @@ import { WorkspaceTools, ensureCacheDirectory } from "./tools";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
 import { ProjectInitializer } from "./projectInit";
-import { ProposalManager } from "./proposalManager";
+import { ChangeWorkbenchManager } from "./changeWorkbench";
 
 interface ActiveScopeSelection {
   scope: string | undefined;
@@ -31,10 +31,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   tools.setActiveScope(sessionStore.activeScope);
   const agent = new CodeAgent(tools, output);
-  const proposalManager = new ProposalManager(context.storageUri ?? context.globalStorageUri, agent, tools, output);
-  await proposalManager.initialize().catch((error) => output.appendLine(`AI 작업본 복원을 건너뛰었습니다: ${error}`));
+  const changeWorkbench = new ChangeWorkbenchManager(context.extensionUri, context.storageUri ?? context.globalStorageUri, tools, output);
+  await changeWorkbench.initialize().catch((error) => output.appendLine(`변경 작업대 복원을 건너뛰었습니다: ${error}`));
   const projectInitializer = new ProjectInitializer(context.secrets, output);
-  const chatView = new ChatViewProvider(context.extensionUri, context.secrets, contextManager, modeManager, sessionStore, agent, proposalManager);
+  const chatView = new ChatViewProvider(context.extensionUri, context.secrets, contextManager, modeManager, sessionStore, agent, changeWorkbench);
 
   await ensureCacheDirectory().catch(() => undefined);
 
@@ -42,11 +42,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     contextManager,
     modeManager,
-    proposalManager,
-    vscode.workspace.registerTextDocumentContentProvider("company-code-ai-original", proposalManager),
-    vscode.languages.registerCodeLensProvider({ scheme: "file" }, proposalManager),
+    changeWorkbench,
     vscode.window.registerWebviewViewProvider("companyCodeAI.chatView", chatView),
     vscode.commands.registerCommand("companyCodeAI.openChat", () => chatView.reveal()),
+    vscode.commands.registerCommand("companyCodeAI.openChangeWorkbench", () => changeWorkbench.open()),
     vscode.commands.registerCommand("companyCodeAI.setPlanMode", async () => {
       await modeManager.set("plan");
       chatView.postState();
@@ -125,30 +124,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage(`컨텍스트를 추가했습니다: ${item.label}`);
       await chatView.reveal();
     }),
-    vscode.commands.registerCommand("companyCodeAI.proposalUseOriginal", async (sessionId: string, draftUri: string, conflictId: string) => {
-      await runProposalCommand(() => proposalManager.resolveConflict(sessionId, draftUri, conflictId, "original"));
-    }),
-    vscode.commands.registerCommand("companyCodeAI.proposalUseAI", async (sessionId: string, draftUri: string, conflictId: string) => {
-      await runProposalCommand(() => proposalManager.resolveConflict(sessionId, draftUri, conflictId, "proposal"));
-    }),
-    vscode.commands.registerCommand("companyCodeAI.proposalUseBoth", async (sessionId: string, draftUri: string, conflictId: string) => {
-      await runProposalCommand(() => proposalManager.resolveConflict(sessionId, draftUri, conflictId, "both"));
-    }),
-    vscode.commands.registerCommand("companyCodeAI.proposalCompareConflict", async (sessionId: string, draftUri: string, conflictId: string) => {
-      await runProposalCommand(() => proposalManager.compareConflict(sessionId, draftUri, conflictId));
-    }),
   );
 }
 
 export function deactivate(): void {}
-
-async function runProposalCommand(action: () => Promise<void>): Promise<void> {
-  try {
-    await action();
-  } catch (error) {
-    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
-  }
-}
 
 async function pickActiveScope(currentScope: string | undefined): Promise<ActiveScopeSelection | undefined> {
   const folder = vscode.workspace.workspaceFolders?.[0];

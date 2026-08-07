@@ -3,6 +3,7 @@
 src/**
 scripts/**
 **/*.map
+*.log
 tsconfig.json
 package-lock.json
 pnpm-lock.yaml
