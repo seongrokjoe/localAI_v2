@@ -13,7 +13,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const contextManager = new ContextManager();
   const modeManager = new ModeManager(context.workspaceState);
   const sessionStore = new SessionStore();
-  await sessionStore.initialize().catch((error) => output.appendLine(`Session initialization skipped: ${error}`));
+  await sessionStore.initialize().catch((error) => output.appendLine(`세션 초기화를 건너뛰었습니다: ${error}`));
   const tools = new WorkspaceTools(async (mode, changes) => {
     await sessionStore.recordChangeSet(mode, changes);
   });
@@ -51,13 +51,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await sessionStore.setActiveScope(scope || undefined);
       tools.setActiveScope(scope || undefined);
       chatView.postState();
-      vscode.window.showInformationMessage(scope ? `Company Code AI scope set to ${scope}.` : "Company Code AI scope cleared.");
+      vscode.window.showInformationMessage(scope ? `Company Code AI 활성 스코프를 ${scope}로 설정했습니다.` : "Company Code AI 활성 스코프를 해제했습니다.");
     }),
     vscode.commands.registerCommand("companyCodeAI.clearActiveScope", async () => {
       await sessionStore.setActiveScope(undefined);
       tools.setActiveScope(undefined);
       chatView.postState();
-      vscode.window.showInformationMessage("Company Code AI active scope cleared.");
+      vscode.window.showInformationMessage("Company Code AI 활성 스코프를 해제했습니다.");
     }),
     vscode.commands.registerCommand("companyCodeAI.reviewLastAIChange", () => chatView.reviewLastAIChange()),
     vscode.commands.registerCommand("companyCodeAI.initProjectSummary", async () => {
@@ -76,31 +76,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("companyCodeAI.setAuthToken", () => setAuthToken(context.secrets)),
     vscode.commands.registerCommand("companyCodeAI.clearAuthToken", async () => {
       await context.secrets.delete(secretTokenKey);
-      vscode.window.showInformationMessage("Company Code AI token cleared.");
+      vscode.window.showInformationMessage("Company Code AI 토큰을 삭제했습니다.");
     }),
     vscode.commands.registerCommand("companyCodeAI.addSelectionToChat", async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
-        vscode.window.showWarningMessage("Open a file before adding a selection.");
+        vscode.window.showWarningMessage("선택 영역을 추가하려면 먼저 파일을 여세요.");
         return;
       }
       const selection = editor.selection;
       if (selection.isEmpty) {
-        vscode.window.showWarningMessage("Select code before adding it to chat.");
+        vscode.window.showWarningMessage("채팅에 추가할 코드를 먼저 선택하세요.");
         return;
       }
       const item = contextManager.addSelection(editor.document, selection, editor.document.getText(selection));
-      vscode.window.showInformationMessage(`Added context: ${item.label}`);
+      vscode.window.showInformationMessage(`컨텍스트를 추가했습니다: ${item.label}`);
       await chatView.reveal();
     }),
     vscode.commands.registerCommand("companyCodeAI.addCurrentFileToChat", async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
-        vscode.window.showWarningMessage("Open a file before adding it to chat.");
+        vscode.window.showWarningMessage("채팅에 추가할 파일을 먼저 여세요.");
         return;
       }
       const item = contextManager.addFile(editor.document);
-      vscode.window.showInformationMessage(`Added context: ${item.label}`);
+      vscode.window.showInformationMessage(`컨텍스트를 추가했습니다: ${item.label}`);
       await chatView.reveal();
     }),
   );
@@ -111,19 +111,19 @@ export function deactivate(): void {}
 async function pickActiveScope(): Promise<string | undefined> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showWarningMessage("Open a workspace folder before setting an active scope.");
+    vscode.window.showWarningMessage("활성 스코프를 설정하려면 먼저 워크스페이스 폴더를 여세요.");
     return undefined;
   }
 
   const items: Array<{ label: string; description: string; value: string }> = [
-    { label: "Repository Root", description: "Use the entire opened workspace.", value: "" },
+    { label: "리포지터리 루트", description: "열려 있는 전체 워크스페이스를 사용합니다.", value: "" },
   ];
 
   try {
     const entries = await vscode.workspace.fs.readDirectory(folder.uri);
     for (const [name, type] of entries) {
       if (type === vscode.FileType.Directory && !name.startsWith(".") && !["bin", "obj", "node_modules", "dist", "build"].includes(name)) {
-        items.push({ label: name, description: "Top-level folder", value: name });
+        items.push({ label: name, description: "최상위 폴더", value: name });
       }
     }
   } catch {
@@ -133,12 +133,12 @@ async function pickActiveScope(): Promise<string | undefined> {
   const projectFiles = await vscode.workspace.findFiles("**/*.{sln,csproj}", "**/{.git,node_modules,bin,obj,dist,build}/**", 100);
   for (const uri of projectFiles) {
     const relative = vscode.workspace.asRelativePath(uri, false);
-    items.push({ label: relative, description: relative.endsWith(".sln") ? "Solution" : "Project", value: relative });
+    items.push({ label: relative, description: relative.endsWith(".sln") ? "솔루션" : "프로젝트", value: relative });
   }
 
   const picked = await vscode.window.showQuickPick(items, {
-    title: "Company Code AI: Set Active Scope",
-    placeHolder: "Choose the solution, project, or folder to prioritize for context.",
+    title: "Company Code AI: 활성 스코프 설정",
+    placeHolder: "컨텍스트에서 우선할 솔루션, 프로젝트, 폴더를 선택하세요.",
   });
   return picked?.value;
 }

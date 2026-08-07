@@ -25,12 +25,12 @@ export class WorkspaceTools {
       type: "function",
       function: {
         name: "listFiles",
-        description: "List workspace files using a glob pattern. This is read-only.",
+        description: "glob 패턴으로 워크스페이스 파일 목록을 조회합니다. 읽기 전용입니다.",
         parameters: {
           type: "object",
           properties: {
-            glob: { type: "string", description: "Glob pattern. Defaults to **/*." },
-            maxResults: { type: "number", description: "Maximum file count. Defaults to 200." },
+            glob: { type: "string", description: "glob 패턴입니다. 기본값은 **/*입니다." },
+            maxResults: { type: "number", description: "최대 파일 수입니다. 기본값은 200입니다." },
           },
           additionalProperties: false,
         },
@@ -40,12 +40,12 @@ export class WorkspaceTools {
       type: "function",
       function: {
         name: "readFile",
-        description: "Read one workspace file. This is read-only and cannot read outside the workspace.",
+        description: "워크스페이스 파일 하나를 읽습니다. 읽기 전용이며 워크스페이스 밖은 읽을 수 없습니다.",
         parameters: {
           type: "object",
           properties: {
-            path: { type: "string", description: "Workspace-relative file path." },
-            maxChars: { type: "number", description: "Maximum characters to return. Defaults to 40000." },
+            path: { type: "string", description: "워크스페이스 기준 상대 경로입니다." },
+            maxChars: { type: "number", description: "반환할 최대 문자 수입니다. 기본값은 40000입니다." },
           },
           required: ["path"],
           additionalProperties: false,
@@ -56,12 +56,12 @@ export class WorkspaceTools {
       type: "function",
       function: {
         name: "searchWorkspace",
-        description: "Search text in workspace files. This is read-only.",
+        description: "워크스페이스 파일에서 텍스트를 검색합니다. 읽기 전용입니다.",
         parameters: {
           type: "object",
           properties: {
-            query: { type: "string", description: "Literal text query." },
-            maxResults: { type: "number", description: "Maximum matches. Defaults to 40." },
+            query: { type: "string", description: "그대로 검색할 텍스트입니다." },
+            maxResults: { type: "number", description: "최대 검색 결과 수입니다. 기본값은 40입니다." },
           },
           required: ["query"],
           additionalProperties: false,
@@ -72,11 +72,11 @@ export class WorkspaceTools {
       type: "function",
       function: {
         name: "getGitDiff",
-        description: "Read the current Git diff for the workspace. This is a fixed read-only Git command.",
+        description: "현재 워크스페이스의 Git diff를 읽습니다. 고정된 읽기 전용 Git 명령입니다.",
         parameters: {
           type: "object",
           properties: {
-            maxChars: { type: "number", description: "Maximum characters to return. Defaults to 60000." },
+            maxChars: { type: "number", description: "반환할 최대 문자 수입니다. 기본값은 60000입니다." },
           },
           additionalProperties: false,
         },
@@ -86,7 +86,7 @@ export class WorkspaceTools {
       type: "function",
       function: {
         name: "proposePatch",
-        description: "Return a structured patch proposal without applying it.",
+        description: "패치를 적용하지 않고 구조화된 패치 제안만 반환합니다.",
         parameters: {
           type: "object",
           properties: {
@@ -113,7 +113,7 @@ export class WorkspaceTools {
       type: "function",
       function: {
         name: "applyPatchAfterUserApproval",
-        description: "Apply exact workspace edits only after an explicit VS Code approval prompt.",
+        description: "VS Code 승인 프롬프트에서 사용자가 명시적으로 승인한 뒤 정확한 워크스페이스 수정만 적용합니다.",
         parameters: {
           type: "object",
           properties: {
@@ -143,7 +143,7 @@ export class WorkspaceTools {
 
   async executeTool(name: string, rawArgs: string, mode: AgentMode): Promise<string> {
     if (mode === "plan" && name === "applyPatchAfterUserApproval") {
-      throw new Error("PlanMode does not allow file edits. Switch to ImplementMode after approving a plan.");
+      throw new Error("PlanMode에서는 파일 수정이 허용되지 않습니다. 계획을 승인한 뒤 ImplementMode로 전환하세요.");
     }
     const args = parseArgs(rawArgs);
     switch (name) {
@@ -160,7 +160,7 @@ export class WorkspaceTools {
       case "applyPatchAfterUserApproval":
         return await this.applyPatchAfterUserApproval(args, mode);
       default:
-        throw new Error(`Unknown tool '${name}'.`);
+        throw new Error(`알 수 없는 도구입니다: '${name}'.`);
     }
   }
 
@@ -270,17 +270,17 @@ export class WorkspaceTools {
     };
     const changes = args.changes ?? [];
     if (changes.length === 0) {
-      throw new Error("No changes were provided.");
+      throw new Error("제공된 변경이 없습니다.");
     }
 
     const labels = changes.map((change) => change.path ?? "[missing path]").join(", ");
     const approved = await vscode.window.showWarningMessage(
-      `Apply ${changes.length} workspace change(s)? ${labels}`,
+      `워크스페이스 변경 ${changes.length}개를 적용할까요? ${labels}`,
       { modal: true },
-      "Apply",
+      "적용",
     );
-    if (approved !== "Apply") {
-      return "User rejected the patch.";
+    if (approved !== "적용") {
+      return "사용자가 패치 적용을 거부했습니다.";
     }
 
     const edit = new vscode.WorkspaceEdit();
@@ -298,7 +298,7 @@ export class WorkspaceTools {
 
       if (typeof change.fullContent === "string") {
         if (!exists && !change.createIfMissing) {
-          throw new Error(`${relativePath} does not exist. Set createIfMissing to true to create it.`);
+          throw new Error(`${relativePath} 파일이 없습니다. 새로 만들려면 createIfMissing을 true로 설정하세요.`);
         }
         const after = change.fullContent;
         replaceWholeDocument(edit, uri, exists ? current : "", after);
@@ -308,10 +308,10 @@ export class WorkspaceTools {
 
       if (typeof change.originalText === "string" && typeof change.replacementText === "string") {
         if (!exists) {
-          throw new Error(`${relativePath} does not exist.`);
+          throw new Error(`${relativePath} 파일이 없습니다.`);
         }
         if (!current.includes(change.originalText)) {
-          throw new Error(`Original text was not found in ${relativePath}.`);
+          throw new Error(`${relativePath}에서 originalText를 찾지 못했습니다.`);
         }
         const next = current.replace(change.originalText, change.replacementText);
         replaceWholeDocument(edit, uri, current, next);
@@ -319,14 +319,14 @@ export class WorkspaceTools {
         continue;
       }
 
-      throw new Error(`${relativePath} must provide fullContent or originalText/replacementText.`);
+      throw new Error(`${relativePath}에는 fullContent 또는 originalText/replacementText가 필요합니다.`);
     }
 
     const ok = await vscode.workspace.applyEdit(edit);
     if (ok && snapshots.length > 0) {
       await this.onChangeSet?.(mode, snapshots);
     }
-    return ok ? "Patch applied." : "VS Code rejected the workspace edit.";
+    return ok ? "패치를 적용했습니다." : "VS Code가 워크스페이스 편집을 거부했습니다.";
   }
 
   resolveWorkspacePath(input: string): vscode.Uri {
@@ -335,7 +335,7 @@ export class WorkspaceTools {
     const fsPath = path.isAbsolute(input) ? path.normalize(input) : path.normalize(path.join(root.fsPath, input));
     const relative = path.relative(root.fsPath, fsPath);
     if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new Error(`Path is outside the workspace: ${input}`);
+      throw new Error(`경로가 워크스페이스 밖에 있습니다: ${input}`);
     }
     return vscode.Uri.file(fsPath);
   }
@@ -360,7 +360,7 @@ export class WorkspaceTools {
 function getWorkspaceRoot(): vscode.Uri {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    throw new Error("Open a workspace folder before using workspace tools.");
+    throw new Error("워크스페이스 도구를 사용하려면 먼저 워크스페이스 폴더를 여세요.");
   }
   return folder.uri;
 }
@@ -371,7 +371,7 @@ function parseArgs(rawArgs: string): Record<string, unknown> {
   }
   const parsed = JSON.parse(rawArgs) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Tool arguments must be a JSON object.");
+    throw new Error("도구 인자는 JSON 객체여야 합니다.");
   }
   return parsed as Record<string, unknown>;
 }

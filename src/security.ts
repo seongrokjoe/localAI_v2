@@ -9,27 +9,27 @@ const hardDeniedHosts = [
 
 export function validateServerUrl(rawUrl: string, allowedHosts: string[]): URL {
   if (!rawUrl.trim()) {
-    throw new Error("Internal LLM server URL is not configured.");
+    throw new Error("사내 LLM 서버 URL이 설정되지 않았습니다.");
   }
 
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
-    throw new Error("Internal LLM server URL is invalid.");
+    throw new Error("사내 LLM 서버 URL 형식이 올바르지 않습니다.");
   }
 
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Internal LLM server URL must use http or https.");
+    throw new Error("사내 LLM 서버 URL은 http 또는 https를 사용해야 합니다.");
   }
 
   const hostname = normalizeHostname(url.hostname);
   if (isHardDeniedHost(hostname)) {
-    throw new Error("The configured server host is explicitly blocked by policy.");
+    throw new Error("설정한 서버 호스트는 정책상 명시적으로 차단되어 있습니다.");
   }
 
   if (!isAllowedHost(hostname, allowedHosts)) {
-    throw new Error(`Server host '${hostname}' is not in companyCodeAI.allowedServerHosts.`);
+    throw new Error(`서버 호스트 '${hostname}'가 companyCodeAI.allowedServerHosts에 포함되어 있지 않습니다.`);
   }
 
   return url;
@@ -73,7 +73,7 @@ export function isAllowedHost(hostname: string, allowedHosts: string[]): boolean
 
 export function assertSafePathSegment(value: string): void {
   if (value.includes("\0")) {
-    throw new Error("Path contains a null byte.");
+    throw new Error("경로에 null byte가 포함되어 있습니다.");
   }
 }
 

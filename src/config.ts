@@ -30,10 +30,10 @@ export async function readRuntimeConfig(secrets: vscode.SecretStorage): Promise<
 export function validateRuntimeSettings(settings: ExtensionSettings): void {
   validateServerUrl(settings.serverUrl, settings.allowedServerHosts);
   if (!settings.model.trim()) {
-    throw new Error("Model is not configured.");
+    throw new Error("모델이 설정되지 않았습니다.");
   }
   if (settings.enableCommandRunner) {
-    throw new Error("The command runner is reserved and disabled in v1.");
+    throw new Error("명령 실행기는 향후 검토용 기능이며 v1에서는 비활성화되어 있습니다.");
   }
 }
 

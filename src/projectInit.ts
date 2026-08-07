@@ -46,27 +46,27 @@ export class ProjectInitializer {
     const existing = await tryReadText(summaryUri);
     if (existing && !refresh) {
       const overwrite = await vscode.window.showWarningMessage(
-        "SUMMARY.md already exists. Refresh it?",
+        "SUMMARY.md가 이미 있습니다. 갱신할까요?",
         { modal: true },
-        "Refresh",
+        "갱신",
       );
-      if (overwrite !== "Refresh") {
+      if (overwrite !== "갱신") {
         return;
       }
     }
 
     const progressOptions = {
       location: vscode.ProgressLocation.Notification,
-      title: "Company Code AI: Initializing project summary",
+      title: "Company Code AI: 프로젝트 요약 초기화 중",
       cancellable: true,
     } satisfies vscode.ProgressOptions;
 
     await vscode.window.withProgress(progressOptions, async (progress, token) => {
       const config = await readRuntimeConfig(this.secrets);
       const client = new LlmClient(config);
-      this.output.appendLine(`Initializing project summary for ${folder.uri.fsPath}`);
+      this.output.appendLine(`프로젝트 요약 초기화 시작: ${folder.uri.fsPath}`);
 
-      progress.report({ message: "Scanning solution and project files" });
+      progress.report({ message: "솔루션 및 프로젝트 파일 스캔 중" });
       const scan = await scanWorkspace(folder.uri);
       await writeInitCache("scan.json", JSON.stringify(scan, null, 2));
       if (token.isCancellationRequested) {
@@ -80,11 +80,11 @@ export class ProjectInitializer {
           return;
         }
         const project = projects[i];
-        progress.report({ message: `Summarizing ${project.path}`, increment: projects.length ? 50 / projects.length : 0 });
+        progress.report({ message: `${project.path} 요약 중`, increment: projects.length ? 50 / projects.length : 0 });
         const context = await buildProjectContext(project);
         const content = await summarizeProject(client, scan, project, context).catch((error) => {
           const message = error instanceof Error ? error.message : String(error);
-          this.output.appendLine(`Project summary failed for ${project.path}: ${message}`);
+          this.output.appendLine(`${project.path} 프로젝트 요약 실패: ${message}`);
           return renderFallbackProjectSummary(project, message);
         });
         projectSummaries.push({ path: project.path, content });
@@ -94,10 +94,10 @@ export class ProjectInitializer {
       if (token.isCancellationRequested) {
         return;
       }
-      progress.report({ message: "Reducing project summaries into SUMMARY.md", increment: 20 });
+      progress.report({ message: "프로젝트 요약을 SUMMARY.md로 축약 중", increment: 20 });
       const summary = await summarizeSolution(client, scan, projectSummaries).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        this.output.appendLine(`Solution summary failed: ${message}`);
+        this.output.appendLine(`솔루션 요약 실패: ${message}`);
         return renderFallbackSolutionSummary(scan, projectSummaries, message);
       });
       const finalSummary = normalizeSummary(summary, scan);
@@ -107,19 +107,19 @@ export class ProjectInitializer {
       await vscode.window.showTextDocument(doc, { preview: true });
 
       const apply = await vscode.window.showInformationMessage(
-        "Write this generated project summary to SUMMARY.md?",
+        "생성된 프로젝트 요약을 SUMMARY.md에 저장할까요?",
         { modal: true },
-        "Write SUMMARY.md",
+        "SUMMARY.md 저장",
       );
-      if (apply !== "Write SUMMARY.md") {
+      if (apply !== "SUMMARY.md 저장") {
         return;
       }
 
       await vscode.workspace.fs.writeFile(summaryUri, Buffer.from(finalSummary, "utf8"));
       const savedDoc = await vscode.workspace.openTextDocument(summaryUri);
       await vscode.window.showTextDocument(savedDoc, { preview: false });
-      this.output.appendLine("SUMMARY.md generated.");
-      vscode.window.showInformationMessage("SUMMARY.md generated.");
+      this.output.appendLine("SUMMARY.md를 생성했습니다.");
+      vscode.window.showInformationMessage("SUMMARY.md를 생성했습니다.");
     });
   }
 
@@ -130,20 +130,20 @@ export class ProjectInitializer {
       const doc = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(doc, { preview: false });
     } catch {
-      vscode.window.showWarningMessage("SUMMARY.md does not exist. Run Company Code AI: Init Project Summary first.");
+      vscode.window.showWarningMessage("SUMMARY.md가 없습니다. 먼저 Company Code AI: 프로젝트 요약 초기화를 실행하세요.");
     }
   }
 
   async clearInitCache(): Promise<void> {
     const folder = getWorkspaceFolder();
     const uri = vscode.Uri.joinPath(folder.uri, ".company-code-ai", "init");
-    const confirm = await vscode.window.showWarningMessage("Clear Company Code AI init cache?", { modal: true }, "Clear");
-    if (confirm !== "Clear") {
+    const confirm = await vscode.window.showWarningMessage("Company Code AI 초기화 캐시를 비울까요?", { modal: true }, "비우기");
+    if (confirm !== "비우기") {
       return;
     }
     await vscode.workspace.fs.delete(uri, { recursive: true, useTrash: false }).then(
-      () => vscode.window.showInformationMessage("Company Code AI init cache cleared."),
-      () => vscode.window.showInformationMessage("Company Code AI init cache was already empty."),
+      () => vscode.window.showInformationMessage("Company Code AI 초기화 캐시를 비웠습니다."),
+      () => vscode.window.showInformationMessage("Company Code AI 초기화 캐시는 이미 비어 있습니다."),
     );
   }
 }
@@ -245,12 +245,12 @@ async function buildProjectContext(project: ProjectInfo): Promise<string> {
     snippets.push(`--- ${relative} ---\n${truncateForInit(text, 12000)}`);
   }
   return [
-    `Project: ${project.path}`,
-    `Target frameworks: ${project.targetFrameworks.join(", ") || "unknown"}`,
-    `Output type: ${project.outputType ?? "unknown"}`,
-    `Project references:\n${project.projectReferences.join("\n") || "(none)"}`,
-    `Package references:\n${project.packageReferences.join("\n") || "(none)"}`,
-    `Candidate files:\n${files.map((file) => vscode.workspace.asRelativePath(file, false)).join("\n")}`,
+    `프로젝트: ${project.path}`,
+    `대상 프레임워크: ${project.targetFrameworks.join(", ") || "알 수 없음"}`,
+    `출력 형식: ${project.outputType ?? "알 수 없음"}`,
+    `프로젝트 참조:\n${project.projectReferences.join("\n") || "(없음)"}`,
+    `패키지 참조:\n${project.packageReferences.join("\n") || "(없음)"}`,
+    `후보 파일:\n${files.map((file) => vscode.workspace.asRelativePath(file, false)).join("\n")}`,
     snippets.join("\n\n"),
   ].join("\n\n");
 }
@@ -260,10 +260,11 @@ async function summarizeProject(client: LlmClient, scan: ScanResult, project: Pr
     {
       role: "system",
       content: [
-        "You summarize one project inside a large internal solution.",
-        "Use only supplied deterministic scan and snippets.",
-        "Do not invent build commands or entry points. Put uncertainty under Unknown.",
-        "Return concise markdown with headings: Purpose, Key Files, Dependencies, Entry Points, Risks, Unknown.",
+        "당신은 대형 사내 솔루션 안의 프로젝트 하나를 요약하는 코드베이스 도우미입니다.",
+        "제공된 결정적 스캔 결과와 코드 조각만 사용하세요.",
+        "빌드 명령이나 진입점을 추측하지 마세요. 불확실한 내용은 '확인 필요'에 적으세요.",
+        "간결한 한국어 markdown으로 반환하세요. 섹션 제목은 '목적', '핵심 파일', '의존성', '진입점', '위험 요소', '확인 필요'를 사용하세요.",
+        "코드 식별자, 파일 경로, 설정 키, 로그 원문은 번역하지 마세요.",
       ].join("\n"),
     },
     {
@@ -283,10 +284,11 @@ async function summarizeSolution(client: LlmClient, scan: ScanResult, projectSum
     {
       role: "system",
       content: [
-        "Create a repository-level SUMMARY.md for an internal coding agent.",
-        "Base claims on deterministic scan and project summaries.",
-        "Every important claim should mention source paths when possible.",
-        "If something is inferred or missing, put it under Unknown / Needs Confirmation.",
+        "사내용 코드 에이전트를 위한 리포지터리 수준 SUMMARY.md를 작성하세요.",
+        "결정적 스캔 결과와 프로젝트 요약에 근거해서만 설명하세요.",
+        "중요한 설명에는 가능한 한 관련 소스 경로를 함께 언급하세요.",
+        "추론이거나 누락된 정보는 '확인 필요'에 적으세요.",
+        "설명은 한국어로 작성하고, 코드 식별자와 파일 경로는 원문을 유지하세요.",
       ].join("\n"),
     },
     {
@@ -294,7 +296,7 @@ async function summarizeSolution(client: LlmClient, scan: ScanResult, projectSum
       content: [
         `<deterministicScan>${truncateForInit(JSON.stringify(scan, null, 2), 70000)}</deterministicScan>`,
         `<projectSummaries>${truncateForInit(projectSummaries.map((item) => `## ${item.path}\n${item.content}`).join("\n\n"), 120000)}</projectSummaries>`,
-        "Generate SUMMARY.md with sections: Solution Overview, Projects, Dependency Graph, Entry Points, Build and Test, Important Directories, Current AI Working Notes, Unknown / Needs Confirmation.",
+        "SUMMARY.md를 다음 섹션으로 생성하세요: 솔루션 개요, 프로젝트 구성, 의존성 그래프, 진입점, 빌드 및 테스트, 중요 디렉터리, 현재 AI 작업 메모, 확인 필요.",
       ].join("\n\n"),
     },
   ];
@@ -313,10 +315,10 @@ async function completePlain(client: LlmClient, messages: ChatMessage[]): Promis
 
 function normalizeSummary(summary: string, scan: ScanResult): string {
   const body = stripMarkdownFence(summary.trim());
-  if (body.startsWith("# Project Summary")) {
-    return `${body}\n\n---\nGenerated by Company Code AI at ${scan.generatedAt}.\n`;
+  if (body.startsWith("# 프로젝트 요약") || body.startsWith("# Project Summary")) {
+    return `${body}\n\n---\nCompany Code AI 생성 시각: ${scan.generatedAt}\n`;
   }
-  return `# Project Summary\n\n${body}\n\n---\nGenerated by Company Code AI at ${scan.generatedAt}.\n`;
+  return `# 프로젝트 요약\n\n${body}\n\n---\nCompany Code AI 생성 시각: ${scan.generatedAt}\n`;
 }
 
 function createFolderFallbackProjects(scan: ScanResult): ProjectInfo[] {
@@ -334,57 +336,57 @@ function renderFallbackProjectSummary(project: ProjectInfo, error: string): stri
   return [
     `# ${project.path}`,
     "",
-    "## Purpose",
-    "Unknown. The model request for this project failed.",
+    "## 목적",
+    "알 수 없음. 이 프로젝트에 대한 모델 요청이 실패했습니다.",
     "",
-    "## Key Files",
-    project.compileFiles.length ? project.compileFiles.map((file) => `- ${file}`).join("\n") : "- Unknown",
+    "## 핵심 파일",
+    project.compileFiles.length ? project.compileFiles.map((file) => `- ${file}`).join("\n") : "- 알 수 없음",
     "",
-    "## Dependencies",
-    project.projectReferences.length ? project.projectReferences.map((file) => `- ${file}`).join("\n") : "- No project references detected.",
+    "## 의존성",
+    project.projectReferences.length ? project.projectReferences.map((file) => `- ${file}`).join("\n") : "- 감지된 ProjectReference가 없습니다.",
     "",
-    "## Entry Points",
-    project.outputType ? `- OutputType: ${project.outputType}` : "- Unknown",
+    "## 진입점",
+    project.outputType ? `- OutputType: ${project.outputType}` : "- 알 수 없음",
     "",
-    "## Risks",
-    "- This is a deterministic fallback summary.",
+    "## 위험 요소",
+    "- 모델 요약 실패로 생성한 결정적 fallback 요약입니다.",
     "",
-    "## Unknown",
-    `- Project summary generation failed: ${error}`,
+    "## 확인 필요",
+    `- 프로젝트 요약 생성 실패: ${error}`,
   ].join("\n");
 }
 
 function renderFallbackSolutionSummary(scan: ScanResult, projectSummaries: ProjectSummary[], error: string): string {
   const solutionList = scan.solutionFiles.length
-    ? scan.solutionFiles.map((solution) => `- ${solution.path} (${solution.projects.length} projects)`).join("\n")
-    : "- No .sln file detected.";
+    ? scan.solutionFiles.map((solution) => `- ${solution.path} (${solution.projects.length}개 프로젝트)`).join("\n")
+    : "- 감지된 .sln 파일이 없습니다.";
   const projectList = scan.projects.length
     ? scan.projects.map((project) => `- ${project.path}`).join("\n")
-    : "- No project files detected.";
+    : "- 감지된 프로젝트 파일이 없습니다.";
   return [
-    "## Solution Overview",
-    `${scan.rootName} contains ${scan.solutionFiles.length} solution file(s) and ${scan.projects.length} project file(s).`,
+    "## 솔루션 개요",
+    `${scan.rootName}에는 솔루션 파일 ${scan.solutionFiles.length}개와 프로젝트 파일 ${scan.projects.length}개가 있습니다.`,
     "",
-    "## Projects",
+    "## 프로젝트 구성",
     projectList,
     "",
-    "## Dependency Graph",
+    "## 의존성 그래프",
     solutionList,
     "",
-    "## Entry Points",
-    "- Unknown. Review project files and startup configuration.",
+    "## 진입점",
+    "- 알 수 없음. 프로젝트 파일과 시작 설정을 확인해야 합니다.",
     "",
-    "## Build and Test",
-    "- Unknown. Build and test commands were not inferred automatically.",
+    "## 빌드 및 테스트",
+    "- 알 수 없음. 빌드 및 테스트 명령은 자동 추론하지 않았습니다.",
     "",
-    "## Important Directories",
-    scan.topLevelFolders.length ? scan.topLevelFolders.map((folder) => `- ${folder}`).join("\n") : "- Unknown",
+    "## 중요 디렉터리",
+    scan.topLevelFolders.length ? scan.topLevelFolders.map((folder) => `- ${folder}`).join("\n") : "- 알 수 없음",
     "",
-    "## Current AI Working Notes",
-    projectSummaries.length ? projectSummaries.map((item) => `- Cached summary: ${item.path}`).join("\n") : "- No project summaries were generated.",
+    "## 현재 AI 작업 메모",
+    projectSummaries.length ? projectSummaries.map((item) => `- 캐시된 요약: ${item.path}`).join("\n") : "- 생성된 프로젝트 요약이 없습니다.",
     "",
-    "## Unknown / Needs Confirmation",
-    `- Solution summary generation failed: ${error}`,
+    "## 확인 필요",
+    `- 솔루션 요약 생성 실패: ${error}`,
   ].join("\n");
 }
 
@@ -403,7 +405,7 @@ async function ensureParent(uri: vscode.Uri): Promise<void> {
 function getWorkspaceFolder(): vscode.WorkspaceFolder {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    throw new Error("Open a workspace folder before initializing a project summary.");
+    throw new Error("프로젝트 요약을 초기화하려면 먼저 워크스페이스 폴더를 여세요.");
   }
   return folder;
 }

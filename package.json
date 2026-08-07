@@ -1,8 +1,8 @@
 {
   "name": "company-code-ai",
   "displayName": "Company Code AI",
-  "description": "VS Code codebase assistant for an internal Chat Completions-compatible LLM server.",
-  "version": "0.1.0",
+  "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
+  "version": "0.1.1",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,
@@ -42,7 +42,7 @@
       "activitybar": [
         {
           "id": "companyCodeAI",
-          "title": "Code AI",
+          "title": "코드 AI",
           "icon": "resources/activity.svg"
         }
       ]
@@ -51,7 +51,7 @@
       "companyCodeAI": [
         {
           "id": "companyCodeAI.chatView",
-          "name": "Chat",
+          "name": "채팅",
           "type": "webview"
         }
       ]
@@ -59,71 +59,71 @@
     "commands": [
       {
         "command": "companyCodeAI.openChat",
-        "title": "Company Code AI: Open Chat"
+        "title": "Company Code AI: 채팅 열기"
       },
       {
         "command": "companyCodeAI.setPlanMode",
-        "title": "Company Code AI: Switch to Plan Mode"
+        "title": "Company Code AI: PlanMode로 전환"
       },
       {
         "command": "companyCodeAI.setImplementMode",
-        "title": "Company Code AI: Switch to Implement Mode"
+        "title": "Company Code AI: ImplementMode로 전환"
       },
       {
         "command": "companyCodeAI.toggleMode",
-        "title": "Company Code AI: Toggle Plan/Implement Mode"
+        "title": "Company Code AI: Plan/Implement 모드 전환"
       },
       {
         "command": "companyCodeAI.clearContext",
-        "title": "Company Code AI: Clear Context"
+        "title": "Company Code AI: 컨텍스트 비우기"
       },
       {
         "command": "companyCodeAI.setActiveScope",
-        "title": "Company Code AI: Set Active Scope"
+        "title": "Company Code AI: 활성 스코프 설정"
       },
       {
         "command": "companyCodeAI.clearActiveScope",
-        "title": "Company Code AI: Clear Active Scope"
+        "title": "Company Code AI: 활성 스코프 해제"
       },
       {
         "command": "companyCodeAI.reviewLastAIChange",
-        "title": "Company Code AI: Review Last AI Change"
+        "title": "Company Code AI: 마지막 AI 변경 리뷰"
       },
       {
         "command": "companyCodeAI.initProjectSummary",
-        "title": "Company Code AI: Init Project Summary"
+        "title": "Company Code AI: 프로젝트 요약 초기화"
       },
       {
         "command": "companyCodeAI.refreshProjectSummary",
-        "title": "Company Code AI: Refresh Project Summary"
+        "title": "Company Code AI: 프로젝트 요약 갱신"
       },
       {
         "command": "companyCodeAI.openProjectSummary",
-        "title": "Company Code AI: Open Project Summary"
+        "title": "Company Code AI: 프로젝트 요약 열기"
       },
       {
         "command": "companyCodeAI.clearInitCache",
-        "title": "Company Code AI: Clear Init Cache"
+        "title": "Company Code AI: 초기화 캐시 비우기"
       },
       {
         "command": "companyCodeAI.configureServer",
-        "title": "Company Code AI: Configure Server"
+        "title": "Company Code AI: 서버 설정"
       },
       {
         "command": "companyCodeAI.setAuthToken",
-        "title": "Company Code AI: Set Auth Token"
+        "title": "Company Code AI: 인증 토큰 설정"
       },
       {
         "command": "companyCodeAI.clearAuthToken",
-        "title": "Company Code AI: Clear Auth Token"
+        "title": "Company Code AI: 인증 토큰 삭제"
       },
       {
         "command": "companyCodeAI.addSelectionToChat",
-        "title": "Company Code AI: Add Selection to Chat"
+        "title": "Company Code AI: 선택 영역을 채팅에 추가"
       },
       {
         "command": "companyCodeAI.addCurrentFileToChat",
-        "title": "Company Code AI: Add Current File to Chat"
+        "title": "Company Code AI: 현재 파일을 채팅에 추가"
       }
     ],
     "configuration": {
@@ -132,26 +132,26 @@
         "companyCodeAI.serverUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Internal LLM server base URL. Accepted forms include `https://llm-gateway.internal/v1` or a full `/chat/completions` endpoint."
+          "markdownDescription": "사내 LLM 서버 기본 URL입니다. `https://llm-gateway.internal/v1` 또는 전체 `/chat/completions` 엔드포인트 형식을 사용할 수 있습니다."
         },
         "companyCodeAI.model": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Model identifier accepted by the internal server."
+          "markdownDescription": "사내 서버가 받는 모델 식별자입니다."
         },
         "companyCodeAI.maxContextTokens": {
           "type": "number",
           "default": 200000,
           "minimum": 8000,
           "maximum": 200000,
-          "markdownDescription": "Target maximum input context tokens sent to the server. The extension enforces a 200k input hard cap."
+          "markdownDescription": "서버로 보낼 입력 컨텍스트 토큰 목표 상한입니다. 확장은 200k 입력 하드캡을 적용합니다."
         },
         "companyCodeAI.maxOutputTokens": {
           "type": "number",
           "default": 60000,
           "minimum": 1024,
           "maximum": 60000,
-          "markdownDescription": "Maximum output tokens requested from the internal Chat Completions-compatible server."
+          "markdownDescription": "사내 Chat Completions 호환 서버에 요청할 최대 출력 토큰 수입니다."
         },
         "companyCodeAI.allowedServerHosts": {
           "type": "array",
@@ -169,7 +169,7 @@
           "items": {
             "type": "string"
           },
-          "markdownDescription": "Allowed internal hostnames, suffixes, or IPv4 CIDR ranges for the LLM server."
+          "markdownDescription": "LLM 서버로 허용할 사내 hostname, suffix, IPv4 CIDR 범위입니다."
         },
         "companyCodeAI.toolCallMode": {
           "type": "string",
@@ -180,19 +180,19 @@
             "json",
             "disabled"
           ],
-          "markdownDescription": "How the agent exposes safe workspace tools to the model."
+          "markdownDescription": "에이전트가 안전한 워크스페이스 도구를 모델에 노출하는 방식입니다."
         },
         "companyCodeAI.requestTimeoutMs": {
           "type": "number",
           "default": 120000,
           "minimum": 10000,
           "maximum": 600000,
-          "markdownDescription": "Timeout for one model request."
+          "markdownDescription": "모델 요청 1회에 대한 timeout입니다."
         },
         "companyCodeAI.enableCommandRunner": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Reserved for a future reviewed command runner. The v1 extension does not execute arbitrary shell commands."
+          "markdownDescription": "향후 검토된 명령 실행기를 위한 예약 설정입니다. v1 확장은 임의 shell 명령을 실행하지 않습니다."
         }
       }
     },

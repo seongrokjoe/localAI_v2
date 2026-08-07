@@ -141,7 +141,7 @@ export class SessionStore {
   private rootPath(): string {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
-      throw new Error("Open a workspace folder before using Company Code AI sessions.");
+      throw new Error("Company Code AI 세션을 사용하려면 먼저 워크스페이스 폴더를 여세요.");
     }
     return path.join(folder.uri.fsPath, ".company-code-ai");
   }
@@ -172,7 +172,7 @@ function trimChars(text: string, max: number): string {
 
 function renderFileDiff(relativePath: string, before: string, after: string): string {
   if (before === after) {
-    return `--- ${relativePath}\n(no textual change)`;
+    return `--- ${relativePath}\n(텍스트 변경 없음)`;
   }
   return [
     `--- ${relativePath} before`,

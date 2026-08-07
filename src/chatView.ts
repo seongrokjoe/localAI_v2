@@ -98,11 +98,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.implementPlan(message.text ?? "");
         break;
       case "refinePlan":
-        this.view?.webview.postMessage({ type: "setInput", text: `Refine this plan:\n\n${message.text ?? ""}` });
+        this.view?.webview.postMessage({ type: "setInput", text: `이 계획을 더 구체화해줘:\n\n${message.text ?? ""}` });
         break;
       case "remember":
         await this.sessionStore.remember(message.text ?? "");
-        vscode.window.showInformationMessage("Company Code AI remembered the selected content.");
+        vscode.window.showInformationMessage("선택한 내용을 Company Code AI가 기억했습니다.");
         break;
     }
   }
@@ -110,21 +110,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   async clearContextMenu(): Promise<void> {
     const choice = await vscode.window.showQuickPick(
       [
-        { label: "Clear Added Context", description: "Remove added files and selections only." },
-        { label: "Clear Chat Session", description: "Clear recent turns and session summary." },
-        { label: "Clear Project Memory", description: "Clear persisted project memory." },
-        { label: "Clear All", description: "Clear added context, chat session, and project memory." },
+        { label: "추가 컨텍스트만 비우기", description: "추가한 파일과 선택 영역만 제거합니다." },
+        { label: "채팅 세션 비우기", description: "최근 대화와 세션 요약을 지웁니다." },
+        { label: "프로젝트 메모리 비우기", description: "저장된 프로젝트 메모리를 지웁니다." },
+        { label: "모두 비우기", description: "추가 컨텍스트, 채팅 세션, 프로젝트 메모리를 모두 지웁니다." },
       ],
-      { title: "Company Code AI: Clear Context" },
+      { title: "Company Code AI: 컨텍스트 비우기" },
     );
     if (!choice) {
       return;
     }
-    if (choice.label === "Clear Added Context") {
+    if (choice.label === "추가 컨텍스트만 비우기") {
       this.contextManager.clear();
-    } else if (choice.label === "Clear Chat Session") {
+    } else if (choice.label === "채팅 세션 비우기") {
       await this.sessionStore.clearAddedSession();
-    } else if (choice.label === "Clear Project Memory") {
+    } else if (choice.label === "프로젝트 메모리 비우기") {
       await this.sessionStore.clearProjectMemory();
     } else {
       this.contextManager.clear();
@@ -137,13 +137,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   async reviewLastAIChange(): Promise<void> {
     const changeSet = await this.sessionStore.getLastChangeSet();
     if (!changeSet) {
-      vscode.window.showWarningMessage("No AI-applied change snapshot is available.");
+      vscode.window.showWarningMessage("AI가 적용한 변경 스냅샷이 없습니다.");
       return;
     }
     this.contextManager.addNote(`AI change ${changeSet.id}`, this.sessionStore.renderChangeSetDiff(changeSet));
     await this.modeManager.set("plan");
     await this.reveal();
-    await this.send("Review the last AI-applied change. Focus on regressions, missed edge cases, and whether the implementation matches the requested plan.");
+    await this.send("마지막으로 AI가 적용한 변경을 리뷰해줘. 회귀 가능성, 놓친 엣지 케이스, 요청한 계획과 구현이 일치하는지를 중심으로 한국어로 검토해줘.");
   }
 
   private async implementPlan(plan: string): Promise<void> {
@@ -152,7 +152,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await this.modeManager.set("implement");
-    await this.send(`Implement this approved plan. Keep edits minimal and ask for file-change approval before applying patches.\n\n${trimmed}`);
+    await this.send(`승인된 아래 계획을 구현해줘. 변경 범위는 최소화하고, 패치를 적용하기 전에 파일 변경 승인을 요청해줘. 설명은 한국어로 작성해줘.\n\n${trimmed}`);
   }
 
   private async send(text: string): Promise<void> {
@@ -161,7 +161,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (this.abortController) {
-      vscode.window.showWarningMessage("A Company Code AI request is already running.");
+      vscode.window.showWarningMessage("Company Code AI 요청이 이미 실행 중입니다.");
       return;
     }
     const slash = prompt.toLowerCase();
@@ -176,7 +176,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.view?.webview.postMessage({ type: "user", text: prompt });
     this.view?.webview.postMessage({ type: "assistantStart" });
-    this.view?.webview.postMessage({ type: "status", text: "Running" });
+    this.view?.webview.postMessage({ type: "status", text: "실행 중" });
 
     this.abortController = new AbortController();
     try {
@@ -198,11 +198,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.modeManager.current === "plan" && response.trim()) {
         this.view?.webview.postMessage({ type: "planActions", text: response });
       }
-      this.view?.webview.postMessage({ type: "status", text: "Ready" });
+      this.view?.webview.postMessage({ type: "status", text: "준비" });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       this.view?.webview.postMessage({ type: "assistantError", text });
-      this.view?.webview.postMessage({ type: "status", text: "Error" });
+      this.view?.webview.postMessage({ type: "status", text: "오류" });
     } finally {
       this.abortController = undefined;
     }
@@ -211,7 +211,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private html(webview: vscode.Webview): string {
     const nonce = createNonce();
     return `<!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
@@ -356,24 +356,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="toolbar">
-    <button id="configure">Server</button>
-    <button id="token">Token</button>
-    <button id="addFile">File</button>
-    <button id="initSummary" title="Generate or refresh SUMMARY.md">Init</button>
-    <button id="clearContext">Clear</button>
-    <span id="status">Ready</span>
+    <button id="configure">서버</button>
+    <button id="token">토큰</button>
+    <button id="addFile">파일</button>
+    <button id="initSummary" title="SUMMARY.md 생성 또는 갱신">초기화</button>
+    <button id="clearContext">비우기</button>
+    <span id="status">준비</span>
   </div>
   <div class="modebar">
-    <button id="planMode">Plan</button>
-    <button id="implementMode">Implement</button>
+    <button id="planMode">계획</button>
+    <button id="implementMode">구현</button>
   </div>
   <div id="context"></div>
   <div id="messages"></div>
   <div class="composer">
-    <textarea id="input" placeholder="Ask about this workspace"></textarea>
+    <textarea id="input" placeholder="이 워크스페이스에 대해 요청하세요"></textarea>
     <div class="composer-actions">
-      <button class="primary" id="send">Send</button>
-      <button id="stop">Stop</button>
+      <button class="primary" id="send">전송</button>
+      <button id="stop">중지</button>
     </div>
   </div>
   <script nonce="${nonce}">
@@ -444,18 +444,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       planMode.classList.toggle('active', state.mode === 'plan');
       implementMode.classList.toggle('active', state.mode === 'implement');
       const scope = state.activeScope ? ' - ' + state.activeScope : '';
-      status.textContent = (state.mode === 'implement' ? 'Implement' : 'Plan') + scope;
+      status.textContent = (state.mode === 'implement' ? '구현' : '계획') + scope;
     }
 
     function renderPlanActions(planText) {
       lastPlan = planText;
       const actions = document.createElement('div');
       actions.className = 'plan-actions';
-      const implement = actionButton('Implement Plan', () => vscode.postMessage({ type: 'implementPlan', text: lastPlan }));
-      const refine = actionButton('Refine Plan', () => vscode.postMessage({ type: 'refinePlan', text: lastPlan }));
-      const discard = actionButton('Discard', () => actions.remove());
-      const remember = actionButton('Remember', () => vscode.postMessage({ type: 'remember', text: lastPlan }));
-      const clear = actionButton('Clear Context', () => vscode.postMessage({ type: 'clearContext' }));
+      const implement = actionButton('계획 구현', () => vscode.postMessage({ type: 'implementPlan', text: lastPlan }));
+      const refine = actionButton('계획 다듬기', () => vscode.postMessage({ type: 'refinePlan', text: lastPlan }));
+      const discard = actionButton('버리기', () => actions.remove());
+      const remember = actionButton('기억하기', () => vscode.postMessage({ type: 'remember', text: lastPlan }));
+      const clear = actionButton('컨텍스트 비우기', () => vscode.postMessage({ type: 'clearContext' }));
       actions.append(implement, refine, discard, remember, clear);
       messages.appendChild(actions);
       messages.scrollTop = messages.scrollHeight;
@@ -477,7 +477,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         label.textContent = item.label;
         const remove = document.createElement('button');
         remove.textContent = 'x';
-        remove.title = 'Remove';
+        remove.title = '제거';
         remove.addEventListener('click', () => vscode.postMessage({ type: 'removeContext', id: item.id }));
         chip.append(label, remove);
         context.appendChild(chip);
@@ -492,7 +492,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 export async function configureServer(): Promise<void> {
   const current = vscode.workspace.getConfiguration("companyCodeAI");
   const serverUrl = await vscode.window.showInputBox({
-    title: "Internal LLM server URL",
+    title: "사내 LLM 서버 URL",
     value: current.get<string>("serverUrl", ""),
     ignoreFocusOut: true,
   });
@@ -501,7 +501,7 @@ export async function configureServer(): Promise<void> {
   }
 
   const model = await vscode.window.showInputBox({
-    title: "Internal model",
+    title: "사내 모델 이름",
     value: current.get<string>("model", ""),
     ignoreFocusOut: true,
   });
@@ -512,13 +512,13 @@ export async function configureServer(): Promise<void> {
 
 export async function setAuthToken(secrets: vscode.SecretStorage): Promise<void> {
   const token = await vscode.window.showInputBox({
-    title: "Internal LLM auth token",
+    title: "사내 LLM 인증 토큰",
     password: true,
     ignoreFocusOut: true,
   });
   if (token !== undefined) {
     await secrets.store(secretTokenKey, token.trim());
-    vscode.window.showInformationMessage("Company Code AI token saved.");
+    vscode.window.showInformationMessage("Company Code AI 토큰을 저장했습니다.");
   }
 }
 

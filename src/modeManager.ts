@@ -42,10 +42,10 @@ export class ModeManager implements vscode.Disposable {
   }
 
   private updateStatus(): void {
-    this.status.text = this.mode === "plan" ? "$(list-tree) Code AI: Plan" : "$(tools) Code AI: Implement";
+    this.status.text = this.mode === "plan" ? "$(list-tree) Code AI: 계획" : "$(tools) Code AI: 구현";
     this.status.tooltip =
       this.mode === "plan"
-        ? "Company Code AI is in PlanMode. File edits are disabled."
-        : "Company Code AI is in ImplementMode. File edits require approval.";
+        ? "Company Code AI는 PlanMode입니다. 파일 수정은 비활성화됩니다."
+        : "Company Code AI는 ImplementMode입니다. 파일 수정에는 승인이 필요합니다.";
   }
 }

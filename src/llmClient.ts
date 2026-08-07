@@ -38,7 +38,7 @@ export class LlmClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`LLM request failed (${response.status}): ${truncate(errorText, 1000)}`);
+        throw new Error(`LLM 요청 실패 (${response.status}): ${truncate(errorText, 1000)}`);
       }
 
       const contentType = response.headers.get("content-type") ?? "";
@@ -91,7 +91,7 @@ async function readJsonCompletion(response: Response, onDelta: (text: string) =>
 async function readSseCompletion(response: Response, onDelta: (text: string) => void): Promise<CompletionResult> {
   const reader = response.body?.getReader();
   if (!reader) {
-    throw new Error("LLM response body is empty.");
+    throw new Error("LLM 응답 본문이 비어 있습니다.");
   }
 
   const decoder = new TextDecoder();
