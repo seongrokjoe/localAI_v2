@@ -1,9 +1,18 @@
 import * as vscode from "vscode";
-import { AgentMode, AgentRunOptions, ContextItem, ChatMessage, RuntimeConfig, ChatToolCall } from "./types";
+import {
+  AgentMode,
+  AgentRunOptions,
+  AssistantPatchApplyResult,
+  ContextItem,
+  ChatMessage,
+  RuntimeConfig,
+  ChatToolCall,
+  PatchApplyOutcome,
+} from "./types";
 import { estimateTokens, truncateToTokens } from "./context";
 import { LlmClient } from "./llmClient";
 import { readSummaryForContext } from "./projectInit";
-import { WorkspaceTools } from "./tools";
+import { formatPatchApplyOutcome, WorkspaceTools } from "./tools";
 
 interface PatchProposalChange {
   path?: string;
@@ -133,44 +142,39 @@ export class CodeAgent {
     onStatus?: (text: string) => void | Promise<void>,
     signal?: AbortSignal,
     approvalMode: PatchApprovalMode = "vscodePrompt",
-  ): Promise<string> {
+  ): Promise<AssistantPatchApplyResult> {
     this.lastRunAppliedWorkspaceChange = false;
     await onStatus?.("변경안 분석 중");
     const contextPack = await this.buildContextPack(originalPrompt, contextItems, config.maxContextTokens, options);
     const proposal = await this.createPatchProposal(originalPrompt, assistantResponse, contextPack, config, signal);
     const changes = proposal.changes ?? [];
     if (changes.length === 0) {
-      const message = proposal.message?.trim() || "적용할 수 있는 안전한 변경안을 찾지 못했습니다. 파일 경로와 기존 원문이 포함되도록 다시 요청하세요.";
-      onDelta(message);
-      return message;
+      const reason = proposal.message?.trim() || "적용할 수 있는 안전한 변경안을 찾지 못했습니다. 파일 경로와 기존 원문이 포함되도록 다시 요청하세요.";
+      return this.finishAssistantPatch(notAppliedOutcome(reason), onDelta);
     }
     const unsafeFullContentPaths = await this.existingFullContentPaths(changes);
     if (unsafeFullContentPaths.length > 0) {
-      const message = [
+      const reason = [
         "기존 파일 전체 덮어쓰기는 인코딩이나 들여쓰기 스타일을 깨뜨릴 수 있어 적용하지 않았습니다.",
         `대상 파일: ${unsafeFullContentPaths.join(", ")}`,
         "해당 파일을 열거나 File로 추가한 뒤, 기존 원문 일부를 기준으로 다시 수정 요청하세요.",
       ].join("\n");
-      onDelta(message);
-      return message;
+      return this.finishAssistantPatch(notAppliedOutcome(reason), onDelta);
     }
 
     await onStatus?.(approvalMode === "preapproved" ? "파일 변경 적용 중" : "파일 변경 승인 대기 중");
-    const result =
+    const outcome =
       approvalMode === "preapproved"
         ? await this.tools.applyPatchWithPriorApproval({ changes }, "implement")
         : await this.tools.applyPatchAfterUserApproval({ changes }, "implement");
-    this.lastRunAppliedWorkspaceChange = result.includes("패치를 적용했습니다.");
-    const response = [proposal.message?.trim(), result].filter(Boolean).join("\n\n");
-    onDelta(response);
-    return response;
+    return this.finishAssistantPatch(outcome, onDelta);
   }
 
   private async executeToolCall(toolCall: ChatToolCall, mode: AgentMode): Promise<string> {
     try {
       const result = await this.tools.executeTool(toolCall.function.name, toolCall.function.arguments, mode);
-      if (toolCall.function.name === "applyPatchAfterUserApproval" && result.includes("패치를 적용했습니다.")) {
-        this.lastRunAppliedWorkspaceChange = true;
+      if (toolCall.function.name === "applyPatchAfterUserApproval") {
+        this.lastRunAppliedWorkspaceChange = this.tools.lastPatchOutcome?.status === "applied";
       }
       return truncateToTokens(result, 12000);
     } catch (error) {
@@ -178,6 +182,13 @@ export class CodeAgent {
       this.output.appendLine(`도구 '${toolCall.function.name}' 실행 실패: ${message}`);
       return JSON.stringify({ error: message });
     }
+  }
+
+  private finishAssistantPatch(outcome: PatchApplyOutcome, onDelta: (text: string) => void): AssistantPatchApplyResult {
+    this.lastRunAppliedWorkspaceChange = outcome.status === "applied";
+    const response = formatPatchApplyOutcome(outcome);
+    onDelta(response);
+    return { response, outcome };
   }
 
   private async createPatchProposal(
@@ -326,7 +337,7 @@ function renderContextItems(items: ContextItem[]): string {
 function renderVisibleEditors(): string {
   return vscode.window.visibleTextEditors
     .map((editor) => {
-      const label = vscode.workspace.asRelativePath(editor.document.uri, false);
+      const label = vscode.workspace.asRelativePath(editor.document.uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
       return `--- ${label} ---\n${truncateToTokens(editor.document.getText(), 12000)}`;
     })
     .join("\n\n");
@@ -418,4 +429,8 @@ function normalizePatchChange(change: PatchProposalChange): PatchProposalChange 
 
 function isPatchProposalChange(change: PatchProposalChange | undefined): change is PatchProposalChange {
   return Boolean(change);
+}
+
+function notAppliedOutcome(message: string): PatchApplyOutcome {
+  return { status: "notApplied", message, targets: [] };
 }

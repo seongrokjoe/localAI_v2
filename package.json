@@ -2,7 +2,7 @@
   "name": "company-code-ai",
   "displayName": "Company Code AI",
   "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,
@@ -26,6 +26,7 @@
     "onCommand:companyCodeAI.setActiveScope",
     "onCommand:companyCodeAI.clearActiveScope",
     "onCommand:companyCodeAI.reviewLastAIChange",
+    "onCommand:companyCodeAI.showLastPatchDiagnostics",
     "onCommand:companyCodeAI.initProjectSummary",
     "onCommand:companyCodeAI.refreshProjectSummary",
     "onCommand:companyCodeAI.openProjectSummary",
@@ -88,6 +89,10 @@
       {
         "command": "companyCodeAI.reviewLastAIChange",
         "title": "Company Code AI: 마지막 AI 변경 리뷰"
+      },
+      {
+        "command": "companyCodeAI.showLastPatchDiagnostics",
+        "title": "Company Code AI: 마지막 패치 진단 보기"
       },
       {
         "command": "companyCodeAI.initProjectSummary",
@@ -229,6 +234,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test:encoding": "npm run compile && node scripts/test-text-encoding.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",
@@ -240,5 +246,8 @@
     "@types/vscode": "^1.93.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.7.3"
   }
 }

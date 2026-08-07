@@ -197,7 +197,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.abortController = new AbortController();
     try {
       const config = await readRuntimeConfig(this.secrets);
-      const response = await this.agent.applyAssistantChangeProposal(
+      const result = await this.agent.applyAssistantChangeProposal(
         this.lastChangeProposal.prompt,
         this.lastChangeProposal.response,
         this.contextManager.list(),
@@ -213,18 +213,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.abortController.signal,
         "preapproved",
       );
-      await this.sessionStore.recordTurn("assistant", response);
-      this.lastChangeProposal = undefined;
-      this.pendingChangeApproval = false;
-      this.view?.webview.postMessage({ type: "clearChangeActions" });
+      await this.sessionStore.recordTurn("assistant", result.response);
       this.view?.webview.postMessage({ type: "assistantDone" });
-      this.view?.webview.postMessage({ type: "status", text: "준비" });
+      if (result.outcome.status === "applied") {
+        this.lastChangeProposal = undefined;
+        this.pendingChangeApproval = false;
+        this.view?.webview.postMessage({ type: "clearChangeActions" });
+        this.view?.webview.postMessage({ type: "status", text: "파일 변경 완료" });
+      } else {
+        this.pendingChangeApproval = true;
+        this.view?.webview.postMessage({
+          type: "changeActions",
+          text:
+            result.outcome.status === "failed"
+              ? "파일 적용에 실패했습니다. 마지막 패치 진단을 확인한 뒤 다시 시도하거나 변경안을 버리세요."
+              : "실제 파일은 변경되지 않았습니다. 변경안 적용을 다시 시도하시겠습니까?",
+        });
+        this.view?.webview.postMessage({ type: "status", text: result.outcome.status === "failed" ? "파일 적용 실패" : "파일 미변경" });
+      }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      this.lastChangeProposal = undefined;
-      this.pendingChangeApproval = false;
-      this.view?.webview.postMessage({ type: "clearChangeActions" });
       this.view?.webview.postMessage({ type: "assistantError", text });
+      this.pendingChangeApproval = Boolean(this.lastChangeProposal);
+      if (this.lastChangeProposal) {
+        this.view?.webview.postMessage({
+          type: "changeActions",
+          text: "파일 적용 중 오류가 발생했습니다. 변경안을 다시 적용하거나 버릴 수 있습니다.",
+        });
+      }
       this.view?.webview.postMessage({ type: "status", text: "오류" });
     } finally {
       this.abortController = undefined;
@@ -306,7 +322,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else if (this.modeManager.current === "implement" && displayResponse.trim()) {
         this.lastChangeProposal = { prompt, response: displayResponse };
         this.pendingChangeApproval = true;
-        this.view?.webview.postMessage({ type: "changeActions" });
+        this.view?.webview.postMessage({
+          type: "changeActions",
+          text: "모델 변경안 생성이 완료되었습니다. 아직 실제 파일은 변경되지 않았습니다. 적용하시겠습니까?",
+        });
       }
       this.view?.webview.postMessage({ type: "status", text: "준비" });
     } catch (error) {
@@ -539,7 +558,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'assistantDone') finishAssistant();
       if (message.type === 'planActions') renderPlanActions(message.text ?? '');
-      if (message.type === 'changeActions') renderChangeActions();
+      if (message.type === 'changeActions') renderChangeActions(message.text);
       if (message.type === 'clearChangeActions') clearChangeActions();
       if (message.type === 'assistantError') {
         stopTimer();
@@ -632,9 +651,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       status.textContent = (state.mode === 'implement' ? '구현' : '계획') + scope;
     }
 
-    function renderChangeActions() {
+    function renderChangeActions(text) {
       clearChangeActions();
-      activeChangeQuestion = appendMessage('assistant', '위 변경안을 실제 파일에 적용하시겠습니까?');
+      activeChangeQuestion = appendMessage('assistant', text || '위 변경안을 실제 파일에 적용하시겠습니까?');
       const actions = document.createElement('div');
       actions.className = 'plan-actions';
       const apply = actionButton('예, 파일에 적용', () => {

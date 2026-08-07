@@ -25,7 +25,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const modeManager = new ModeManager(context.workspaceState);
   const sessionStore = new SessionStore();
   await sessionStore.initialize().catch((error) => output.appendLine(`세션 초기화를 건너뛰었습니다: ${error}`));
-  const tools = new WorkspaceTools(async (mode, changes) => {
+  const tools = new WorkspaceTools(output, async (mode, changes) => {
     await sessionStore.recordChangeSet(mode, changes);
   });
   tools.setActiveScope(sessionStore.activeScope);
@@ -75,6 +75,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage("Company Code AI 활성 스코프를 해제했습니다.");
     }),
     vscode.commands.registerCommand("companyCodeAI.reviewLastAIChange", () => chatView.reviewLastAIChange()),
+    vscode.commands.registerCommand("companyCodeAI.showLastPatchDiagnostics", () => tools.showLastPatchDiagnostics()),
     vscode.commands.registerCommand("companyCodeAI.initProjectSummary", async () => {
       await modeManager.set("plan");
       chatView.postState();

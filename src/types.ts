@@ -81,6 +81,29 @@ export interface FileSnapshotChange {
   description?: string;
 }
 
+export type PatchApplyStatus = "applied" | "notApplied" | "failed";
+export type PatchSaveMethod = "vscode" | "direct";
+
+export interface PatchTargetResult {
+  path: string;
+  absolutePath: string;
+  encoding: string;
+  saveMethod: PatchSaveMethod;
+  beforeHash?: string;
+  afterHash: string;
+}
+
+export interface PatchApplyOutcome {
+  status: PatchApplyStatus;
+  message: string;
+  targets: PatchTargetResult[];
+}
+
+export interface AssistantPatchApplyResult {
+  response: string;
+  outcome: PatchApplyOutcome;
+}
+
 export interface ChangeSet {
   id: string;
   createdAt: number;

@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { AgentMode, ChatToolDefinition, FileSnapshotChange } from "./types";
+import { AgentMode, ChatToolDefinition, FileSnapshotChange, PatchApplyOutcome, PatchTargetResult } from "./types";
 import { assertSafePathSegment } from "./security";
+import { decodeText, detectTextEncoding, encodeText, encodingForNewFile, TextEncodingInfo } from "./textEncoding";
 
 const excludeGlob = "**/{.git,node_modules,dist,out,build,.company-code-ai,.vscode-test}/**";
 
@@ -12,6 +14,8 @@ interface TextFileState {
   text: string;
   eol: string;
   isDirty: boolean;
+  bytes?: Uint8Array;
+  encoding: TextEncodingInfo;
 }
 
 interface PatchChangeInput {
@@ -38,13 +42,33 @@ interface PreparedPatch {
 interface PreparedPatchTarget {
   path: string;
   uri: vscode.Uri;
+  before: string;
   after: string;
+  existed: boolean;
+  beforeBytes?: Uint8Array;
+  encoding: TextEncodingInfo;
 }
 
 export class WorkspaceTools {
   private activeScope?: string;
+  private lastOutcome?: PatchApplyOutcome;
+  private lastDiagnostics: string[] = [];
 
-  constructor(private readonly onChangeSet?: (mode: AgentMode, changes: FileSnapshotChange[]) => Promise<void>) {}
+  constructor(
+    private readonly output: vscode.OutputChannel,
+    private readonly onChangeSet?: (mode: AgentMode, changes: FileSnapshotChange[]) => Promise<void>,
+  ) {}
+
+  get lastPatchOutcome(): PatchApplyOutcome | undefined {
+    return this.lastOutcome;
+  }
+
+  showLastPatchDiagnostics(): void {
+    this.output.show(true);
+    if (this.lastDiagnostics.length === 0) {
+      this.output.appendLine("[패치 진단] 아직 기록된 패치 적용 시도가 없습니다.");
+    }
+  }
 
   setActiveScope(scope: string | undefined): void {
     this.activeScope = scope;
@@ -191,8 +215,10 @@ export class WorkspaceTools {
         return await this.getGitDiff(numberOr(args.maxChars, 60000));
       case "proposePatch":
         return JSON.stringify(args);
-      case "applyPatchAfterUserApproval":
-        return await this.applyPatchAfterUserApproval(args, mode);
+      case "applyPatchAfterUserApproval": {
+        const outcome = await this.applyPatchAfterUserApproval(args, mode);
+        return formatPatchApplyOutcome(outcome);
+      }
       default:
         throw new Error(`알 수 없는 도구입니다: '${name}'.`);
     }
@@ -201,7 +227,7 @@ export class WorkspaceTools {
   async listFiles(glob = "**/*", maxResults = 200): Promise<string[]> {
     const scopedGlob = this.applyActiveScope(glob);
     const files = await vscode.workspace.findFiles(scopedGlob, excludeGlob, maxResults);
-    return files.map((uri) => vscode.workspace.asRelativePath(uri, false)).sort();
+    return files.map(workspaceRelativePath).sort();
   }
 
   async readFile(relativePath: string, maxChars = 40000): Promise<string> {
@@ -291,23 +317,33 @@ export class WorkspaceTools {
     });
   }
 
-  async applyPatchAfterUserApproval(rawArgs: unknown, mode: AgentMode): Promise<string> {
+  async applyPatchAfterUserApproval(rawArgs: unknown, mode: AgentMode): Promise<PatchApplyOutcome> {
     assertPatchAllowed(mode);
-    const prepared = await this.preparePatch(rawArgs);
-    const approved = await vscode.window.showWarningMessage(
-      `워크스페이스 변경 ${prepared.count}개를 적용할까요? ${prepared.labels}`,
-      { modal: true },
-      "적용",
-    );
-    if (approved !== "적용") {
-      return "사용자가 패치 적용을 거부했습니다.";
+    this.beginPatchDiagnostics();
+    try {
+      const prepared = await this.preparePatch(rawArgs);
+      const approved = await vscode.window.showWarningMessage(
+        `워크스페이스 변경 ${prepared.count}개를 적용할까요? ${prepared.labels}`,
+        { modal: true },
+        "적용",
+      );
+      if (approved !== "적용") {
+        return this.finishPatchOutcome(notAppliedOutcome("사용자가 패치 적용을 취소했습니다. 파일은 변경되지 않았습니다."));
+      }
+      return await this.applyPreparedPatch(prepared, mode);
+    } catch (error) {
+      return this.finishPatchOutcome(failedOutcome(errorMessage(error)));
     }
-    return await this.applyPreparedPatch(prepared, mode);
   }
 
-  async applyPatchWithPriorApproval(rawArgs: unknown, mode: AgentMode): Promise<string> {
+  async applyPatchWithPriorApproval(rawArgs: unknown, mode: AgentMode): Promise<PatchApplyOutcome> {
     assertPatchAllowed(mode);
-    return await this.applyPreparedPatch(await this.preparePatch(rawArgs), mode);
+    this.beginPatchDiagnostics();
+    try {
+      return await this.applyPreparedPatch(await this.preparePatch(rawArgs), mode);
+    } catch (error) {
+      return this.finishPatchOutcome(failedOutcome(errorMessage(error)));
+    }
   }
 
   private async preparePatch(rawArgs: unknown): Promise<PreparedPatch> {
@@ -340,7 +376,15 @@ export class WorkspaceTools {
         }
         replaceWholeDocument(edit, uri, exists ? current : "", after);
         snapshots.push({ path: relativePath, before: exists ? current : "", after, description: change.description });
-        targets.push({ path: relativePath, uri, after });
+        targets.push({
+          path: relativePath,
+          uri,
+          before: exists ? current : "",
+          after,
+          existed: exists,
+          beforeBytes: state.bytes,
+          encoding: state.encoding,
+        });
         continue;
       }
 
@@ -359,7 +403,15 @@ export class WorkspaceTools {
         }
         replaceWholeDocument(edit, uri, current, next);
         snapshots.push({ path: relativePath, before: current, after: next, description: change.description });
-        targets.push({ path: relativePath, uri, after: next });
+        targets.push({
+          path: relativePath,
+          uri,
+          before: current,
+          after: next,
+          existed: true,
+          beforeBytes: state.bytes,
+          encoding: state.encoding,
+        });
         continue;
       }
 
@@ -379,52 +431,139 @@ export class WorkspaceTools {
     };
   }
 
-  private async applyPreparedPatch(prepared: PreparedPatch, mode: AgentMode): Promise<string> {
-    const ok = await vscode.workspace.applyEdit(prepared.edit);
-    if (!ok) {
-      return "VS Code가 워크스페이스 편집을 거부했습니다.";
-    }
-
-    for (const target of prepared.targets) {
-      const document = await vscode.workspace.openTextDocument(target.uri);
-      if (document.getText() !== target.after) {
-        throw new Error(`${target.path} 파일에 패치가 예상대로 반영되지 않았습니다.`);
+  private async applyPreparedPatch(prepared: PreparedPatch, mode: AgentMode): Promise<PatchApplyOutcome> {
+    try {
+      this.appendPatchDiagnostic(`워크스페이스 편집 시작: ${prepared.labels}`);
+      const ok = await vscode.workspace.applyEdit(prepared.edit);
+      if (!ok) {
+        return this.finishPatchOutcome(failedOutcome("VS Code가 워크스페이스 편집을 거부했습니다."));
       }
-      if (document.isDirty) {
-        const saved = await document.save();
-        if (!saved) {
-          throw new Error(`${target.path} 파일 저장에 실패했습니다.`);
+
+      const targetResults: PatchTargetResult[] = [];
+      for (const target of prepared.targets) {
+        const absolutePath = target.uri.scheme === "file" ? target.uri.fsPath : target.uri.toString(true);
+        const expectedBytes = encodeText(target.after, target.encoding);
+        const beforeHash = target.beforeBytes ? hashBytes(target.beforeBytes) : undefined;
+        this.appendPatchDiagnostic(`대상: ${target.path}`);
+        this.appendPatchDiagnostic(`실제 경로: ${absolutePath}`);
+        this.appendPatchDiagnostic(`인코딩: ${target.encoding.name}${target.encoding.addBom ? " + BOM" : ""}`);
+
+        const document = await vscode.workspace.openTextDocument(target.uri);
+        if (document.getText() !== target.after) {
+          throw new Error(`${target.path} 파일에 패치가 예상대로 반영되지 않았습니다.`);
+        }
+
+        let saveMethod: PatchTargetResult["saveMethod"] = "vscode";
+        let saved = true;
+        if (document.isDirty) {
+          saved = await document.save();
+          this.appendPatchDiagnostic(`VS Code 저장 결과: ${saved ? "성공" : "실패"}`);
+        }
+        if (document.getText() !== target.after) {
+          throw new Error(`${target.path} 파일이 저장 과정에서 포맷터나 다른 확장에 의해 변경되었습니다.`);
+        }
+
+        let diskBytes = await tryReadBytes(target.uri);
+        if (!saved || !diskBytes || !bytesEqual(diskBytes, expectedBytes)) {
+          saveMethod = "direct";
+          this.appendPatchDiagnostic("디스크 내용이 예상과 달라 workspace.fs.writeFile 직접 저장을 시작합니다.");
+          await vscode.workspace.fs.writeFile(target.uri, expectedBytes);
+          diskBytes = await tryReadBytes(target.uri);
+        }
+
+        if (!diskBytes || !bytesEqual(diskBytes, expectedBytes)) {
+          throw new Error(`${target.path} 파일을 직접 저장한 뒤에도 디스크 내용이 예상과 다릅니다.`);
+        }
+        if (decodeText(diskBytes, target.encoding) !== target.after) {
+          throw new Error(`${target.path} 파일 저장 후 텍스트를 원래 인코딩으로 검증하지 못했습니다.`);
+        }
+
+        const afterHash = hashBytes(diskBytes);
+        if (target.existed && beforeHash === afterHash) {
+          throw new Error(`${target.path} 파일의 디스크 해시가 변경되지 않았습니다.`);
+        }
+        this.appendPatchDiagnostic(`저장 방식: ${saveMethod === "direct" ? "직접 저장" : "VS Code 저장"}`);
+        this.appendPatchDiagnostic(`해시: ${beforeHash ?? "새 파일"} -> ${afterHash}`);
+        targetResults.push({
+          path: target.path,
+          absolutePath,
+          encoding: `${target.encoding.name}${target.encoding.addBom ? " + BOM" : ""}`,
+          saveMethod,
+          beforeHash,
+          afterHash,
+        });
+      }
+
+      let snapshotWarning = "";
+      if (prepared.snapshots.length > 0) {
+        try {
+          await this.onChangeSet?.(mode, prepared.snapshots);
+        } catch (error) {
+          snapshotWarning = ` 변경 스냅샷 기록은 실패했습니다: ${errorMessage(error)}`;
+          this.appendPatchDiagnostic(snapshotWarning.trim());
         }
       }
-      const savedDocument = await vscode.workspace.openTextDocument(target.uri);
-      if (savedDocument.isDirty) {
-        throw new Error(`${target.path} 파일이 저장되지 않은 상태로 남아 있습니다.`);
-      }
-      if (savedDocument.getText() !== target.after) {
-        throw new Error(`${target.path} 파일 저장 후 내용이 예상과 다릅니다. 저장 시 포맷터나 다른 확장이 내용을 바꿨을 수 있습니다.`);
-      }
-    }
 
-    if (prepared.snapshots.length > 0) {
-      try {
-        await this.onChangeSet?.(mode, prepared.snapshots);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return `패치를 적용했습니다. 저장 및 검증 완료: ${prepared.labels}\n\n변경 스냅샷 저장은 실패했습니다: ${message}`;
-      }
+      return this.finishPatchOutcome({
+        status: "applied",
+        message: `실제 파일 ${targetResults.length}개의 디스크 저장과 검증을 완료했습니다.${snapshotWarning}`,
+        targets: targetResults,
+      });
+    } catch (error) {
+      return this.finishPatchOutcome(failedOutcome(errorMessage(error)));
     }
-    return `패치를 적용했습니다. 저장 및 검증 완료: ${prepared.labels}`;
   }
 
   resolveWorkspacePath(input: string): vscode.Uri {
     assertSafePathSegment(input);
-    const root = getWorkspaceRoot();
-    const fsPath = path.isAbsolute(input) ? path.normalize(input) : path.normalize(path.join(root.fsPath, input));
-    const relative = path.relative(root.fsPath, fsPath);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new Error(`경로가 워크스페이스 밖에 있습니다: ${input}`);
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      throw new Error("워크스페이스 도구를 사용하려면 먼저 워크스페이스 폴더를 여세요.");
     }
-    return vscode.Uri.file(fsPath);
+
+    if (path.isAbsolute(input)) {
+      const fsPath = path.normalize(input);
+      const folder = folders.find((candidate) => isPathInside(candidate.uri.fsPath, fsPath));
+      if (!folder) {
+        throw new Error(`경로가 열린 워크스페이스 밖에 있습니다: ${input}`);
+      }
+      return vscode.Uri.file(fsPath);
+    }
+
+    const normalized = input.replace(/\\/g, "/").replace(/^\/+/, "");
+    const segments = normalized.split("/").filter(Boolean);
+    if (segments.includes("..")) {
+      throw new Error(`경로가 열린 워크스페이스 밖을 가리킵니다: ${input}`);
+    }
+    if (folders.length === 1) {
+      return vscode.Uri.joinPath(folders[0].uri, ...segments);
+    }
+
+    const matchedFolder = folders.find((folder) => normalized.toLowerCase().startsWith(`${folder.name.toLowerCase()}/`));
+    if (!matchedFolder) {
+      throw new Error(`다중 루트 워크스페이스의 경로에는 워크스페이스 폴더 이름이 필요합니다: ${input}`);
+    }
+    const relative = normalized.slice(matchedFolder.name.length + 1);
+    return vscode.Uri.joinPath(matchedFolder.uri, ...relative.split("/").filter(Boolean));
+  }
+
+  private beginPatchDiagnostics(): void {
+    this.lastOutcome = undefined;
+    this.lastDiagnostics = [`[패치 진단 ${new Date().toISOString()}]`];
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString(true)).join(", ");
+    this.appendPatchDiagnostic(`열린 워크스페이스: ${roots || "없음"}`);
+    this.appendPatchDiagnostic(`활성 스코프: ${this.activeScope ?? "전체 워크스페이스"}`);
+  }
+
+  private appendPatchDiagnostic(message: string): void {
+    this.lastDiagnostics.push(message);
+    this.output.appendLine(`[패치 진단] ${message}`);
+  }
+
+  private finishPatchOutcome(outcome: PatchApplyOutcome): PatchApplyOutcome {
+    this.lastOutcome = outcome;
+    this.appendPatchDiagnostic(`최종 상태: ${outcome.status} - ${outcome.message}`);
+    return outcome;
   }
 
   private applyActiveScope(glob: string): string {
@@ -488,12 +627,32 @@ function replaceWholeDocument(edit: vscode.WorkspaceEdit, uri: vscode.Uri, curre
 }
 
 async function readTextFileState(uri: vscode.Uri): Promise<TextFileState> {
+  const configuredEncoding = vscode.workspace.getConfiguration("files", uri).get<string>("encoding", "utf8");
   try {
-    const document = await vscode.workspace.openTextDocument(uri);
-    return { exists: true, text: document.getText(), eol: documentLineEnding(document), isDirty: document.isDirty };
-  } catch {
-    return { exists: false, text: "", eol: "\n", isDirty: false };
+    await vscode.workspace.fs.stat(uri);
+  } catch (error) {
+    if (!isFileNotFound(error)) {
+      throw error;
+    }
+    return {
+      exists: false,
+      text: "",
+      eol: "\n",
+      isDirty: false,
+      encoding: encodingForNewFile(configuredEncoding),
+    };
   }
+
+  const bytes = await vscode.workspace.fs.readFile(uri);
+  const document = await vscode.workspace.openTextDocument(uri);
+  return {
+    exists: true,
+    text: document.getText(),
+    eol: documentLineEnding(document),
+    isDirty: document.isDirty,
+    bytes,
+    encoding: detectTextEncoding(bytes, document.getText(), configuredEncoding),
+  };
 }
 
 function documentLineEnding(document: vscode.TextDocument): string {
@@ -510,6 +669,63 @@ function findOriginalText(current: string, originalText: string, eol: string): s
 
 function adaptLineEndings(text: string, eol: string): string {
   return text.replace(/\r\n|\r|\n/g, eol);
+}
+
+export function formatPatchApplyOutcome(outcome: PatchApplyOutcome): string {
+  if (outcome.status === "notApplied") {
+    return `파일은 변경되지 않았습니다. ${outcome.message}`;
+  }
+  if (outcome.status === "failed") {
+    return `파일 적용에 실패했습니다. 성공으로 확인되지 않았으며 일부 편집기 버퍼에 변경이 남아 있을 수 있습니다. ${outcome.message}`;
+  }
+  const files = outcome.targets
+    .map((target) => `- ${target.path} (${target.saveMethod === "direct" ? "직접 저장" : "VS Code 저장"}, ${target.encoding})`)
+    .join("\n");
+  return [`실제 파일 변경 완료: ${outcome.message}`, files].filter(Boolean).join("\n");
+}
+
+function notAppliedOutcome(message: string): PatchApplyOutcome {
+  return { status: "notApplied", message, targets: [] };
+}
+
+function failedOutcome(message: string): PatchApplyOutcome {
+  return { status: "failed", message, targets: [] };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function hashBytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return Buffer.from(left.buffer, left.byteOffset, left.byteLength).equals(Buffer.from(right.buffer, right.byteOffset, right.byteLength));
+}
+
+async function tryReadBytes(uri: vscode.Uri): Promise<Uint8Array | undefined> {
+  try {
+    return await vscode.workspace.fs.readFile(uri);
+  } catch {
+    return undefined;
+  }
+}
+
+function isFileNotFound(error: unknown): boolean {
+  if (error instanceof vscode.FileSystemError) {
+    return error.code === "FileNotFound";
+  }
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT");
+}
+
+function isPathInside(rootPath: string, targetPath: string): boolean {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function workspaceRelativePath(uri: vscode.Uri): string {
+  return vscode.workspace.asRelativePath(uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
 }
 
 function lineNumberAt(content: string, index: number): number {

@@ -1,6 +1,5 @@
 .vscode/**
 .company-code-ai/**
-node_modules/**
 src/**
 scripts/**
 **/*.map
