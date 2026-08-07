@@ -361,16 +361,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     :root {
       color-scheme: light dark;
     }
+    html,
     body {
+      height: 100%;
       margin: 0;
       padding: 0;
+      overflow: hidden;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
       color: var(--vscode-foreground);
       background: var(--vscode-sideBar-background);
     }
+    .top-controls {
+      flex: 0 0 auto;
+      min-width: 0;
+      background: var(--vscode-sideBar-background);
+      z-index: 1;
+    }
     .toolbar {
       display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       align-items: center;
       padding: 8px;
@@ -412,6 +426,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     #context {
       display: flex;
       flex-wrap: wrap;
+      max-height: 88px;
+      overflow-y: auto;
       gap: 6px;
       padding: 8px;
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
@@ -438,7 +454,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-foreground);
     }
     #messages {
-      padding: 10px 8px 96px;
+      flex: 1 1 auto;
+      min-height: 0;
+      padding: 10px 8px;
       overflow-y: auto;
     }
     .message {
@@ -469,10 +487,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       padding: 0 2px;
     }
     .composer {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
+      flex: 0 0 auto;
       padding: 8px;
       display: grid;
       grid-template-columns: 1fr auto;
@@ -499,19 +514,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <button id="configure">서버</button>
-    <button id="token">토큰</button>
-    <button id="addFile">파일</button>
-    <button id="initSummary" title="SUMMARY.md 생성 또는 갱신">초기화</button>
-    <button id="clearContext">비우기</button>
-    <span id="status">준비</span>
+  <div class="top-controls">
+    <div class="toolbar">
+      <button id="configure">서버</button>
+      <button id="token">토큰</button>
+      <button id="addFile">파일</button>
+      <button id="initSummary" title="SUMMARY.md 생성 또는 갱신">초기화</button>
+      <button id="clearContext">비우기</button>
+      <span id="status">준비</span>
+    </div>
+    <div class="modebar">
+      <button id="planMode">계획</button>
+      <button id="implementMode">구현</button>
+    </div>
+    <div id="context"></div>
   </div>
-  <div class="modebar">
-    <button id="planMode">계획</button>
-    <button id="implementMode">구현</button>
-  </div>
-  <div id="context"></div>
   <div id="messages"></div>
   <div class="composer">
     <textarea id="input" placeholder="이 워크스페이스에 대해 요청하세요"></textarea>
