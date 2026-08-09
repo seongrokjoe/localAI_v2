@@ -251,7 +251,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         () => undefined,
         this.abortController.signal,
         (status) => {
-          this.view?.webview.postMessage({ type: "operation", text: status });
+          if (status.startsWith("[검증]")) {
+            this.view?.webview.postMessage({ type: "operation", text: status });
+          }
           this.view?.webview.postMessage({ type: "status", text: status });
         },
       );
@@ -272,8 +274,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           const state = await this.changeWorkbench.create(prompt, displayResponse, result.changeBlocks, result.sourceSnapshots);
           this.postWorkbenchState(state);
           this.view?.webview.postMessage({
-            type: "status",
-            text: result.validation?.status === "passed" ? "Validated change candidate is ready for review." : "Last change candidate is unverified; review validation diagnostics before applying.",
+            type: "operation",
+            text: result.validation?.status === "passed"
+              ? "[검증 결과] 빌드/테스트를 통과한 변경안입니다."
+              : result.validation?.status === "failed"
+                ? "[검증 결과] 빌드/테스트가 실패한 변경안입니다. 오류 내용을 확인하세요."
+                : "[검증 결과] 빌드/테스트가 수행되지 않은 변경안입니다. 검증 설정과 프로젝트 매핑을 확인하세요.",
           });
           this.view?.webview.postMessage({ type: "assistant", text: `코드 변경 블록 ${result.changeBlocks.length}개를 변경 작업대에 열었습니다.` });
           this.view?.webview.postMessage({ type: "status", text: "변경 작업대 편집 중" });
@@ -423,6 +429,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     .message.working {
       opacity: 0.78;
+    }
+    .message.operation {
+      padding: 6px 8px;
+      color: var(--vscode-descriptionForeground);
+      border-style: dashed;
+      font-size: 0.92em;
     }
     .plan-actions {
       display: flex;

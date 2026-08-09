@@ -57,14 +57,16 @@ try {
   assert.equal(isSafeValidationCommand("npm", ["install"]), false);
   assert.equal(isSafeValidationCommand("powershell.exe", ["-Command", "git push"]), false);
   assert.equal(taskTargetsProject("Build solution", "msbuild", ["unrelated/app.vcxproj"], "lib/lib.vcxproj"), false);
-  assert.equal(taskTargetsProject("Build lib.vcxproj", process.execPath, ["-e", "process.exit(0)"], "lib/lib.vcxproj"), true);
+  assert.equal(taskTargetsProject("Build lib.vcxproj", process.execPath, ["-e", "process.exit(0)"], "lib/lib.vcxproj"), false);
   assert.equal(taskTargetsProject("Build selected", "msbuild", ["${workspaceFolder}\\lib\\lib.vcxproj"], "lib/lib.vcxproj"), true);
+  assert.equal(taskTargetsProject("Build selected", "msbuild", ["workspace.sln", "lib/lib.vcxproj"], "lib/lib.vcxproj"), false);
 
   await write(root, ".vscode/tasks.json", JSON.stringify({ version: "2.0.0", tasks: [
-    { label: "Build lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "if (require('fs').existsSync('.git') || !require('fs').readFileSync('lib/src/core.cpp','utf8').includes('newCore')) process.exit(2)"], group: "build" },
-    { label: "Test lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.exit(0)"], group: "test" },
-    { label: "Build app.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.exit(9)"], group: "build" },
+    { label: "Build lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "if (require('fs').existsSync('.git') || !require('fs').readFileSync('lib/src/core.cpp','utf8').includes('newCore')) process.exit(2)", "lib/lib.vcxproj"], group: "build" },
+    { label: "Test lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.exit(0)", "lib/lib.vcxproj"], group: "test" },
+    { label: "Build app.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.exit(9)", "app/app.vcxproj"], group: "build" },
   ] }));
+  const validationStatuses = [];
   const validation = await validateLineMappedChanges([{
     id: "C001",
     protocolId: "P001",
@@ -74,14 +76,16 @@ try {
     startLine: 2,
     endLine: 2,
     code: "newCore();",
-  }], [snapshot], { root });
+  }], [snapshot], { root, onStatus: (status) => validationStatuses.push(status) });
   assert.equal(validation.status, "passed");
   assert.deepEqual(validation.projects.map((project) => project.path), ["lib/lib.vcxproj"]);
   assert.equal(validation.commands.some((command) => command.includes("app.vcxproj")), false);
+  assert.equal(validationStatuses.some((status) => status.includes("빌드 수행 중: lib/lib.vcxproj")), true);
+  assert.equal(validationStatuses.some((status) => status.includes("빌드/테스트 검증 완료")), true);
   assert.equal((await fs.readFile(path.join(root, "lib/src/core.cpp"), "utf8")).includes("newCore"), false);
 
   await write(root, ".vscode/tasks.json", JSON.stringify({ version: "2.0.0", tasks: [
-    { label: "Build lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.stderr.write('core.cpp(2,4): error C0001: broken') ; process.exit(1)"], group: "build" },
+    { label: "Build lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.stderr.write('core.cpp(2,4): error C0001: broken') ; process.exit(1)", "lib/lib.vcxproj"], group: "build" },
   ] }));
   const failed = await validateLineMappedChanges([{
     id: "C001",

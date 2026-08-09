@@ -79,9 +79,11 @@ export async function validateLineMappedChanges(
   const graph = await discoverProjectGraph(options.root, materialized.map((file) => file.path), options.projectOverrides);
   const projects = graph.changedProjects;
   if (materialized.length === 0) {
+    await options.onStatus?.("[검증] 빌드/테스트 미수행: 적용할 변경 파일이 없습니다.");
     return { status: "skipped", summary: "No materialized changes were found.", output: "", diagnostics: [], projects, commands: [], changedFiles: [] };
   }
   if (graph.ambiguousPaths.length > 0) {
+    await options.onStatus?.("[검증] 빌드/테스트 대기: 변경 파일의 소속 프로젝트를 선택해야 합니다.");
     return {
       status: "skipped",
       summary: `Multiple containing projects were found for: ${graph.ambiguousPaths.join(", ")}`,
@@ -94,6 +96,7 @@ export async function validateLineMappedChanges(
     };
   }
   if (graph.unresolvedPaths.length > 0) {
+    await options.onStatus?.("[검증] 빌드/테스트 미수행: 변경 파일의 소속 프로젝트를 찾지 못했습니다.");
     return {
       status: "skipped",
       summary: `No containing project was found for: ${graph.unresolvedPaths.join(", ")}`,
@@ -105,6 +108,7 @@ export async function validateLineMappedChanges(
     };
   }
   if (projects.length === 0) {
+    await options.onStatus?.("[검증] 빌드/테스트 미수행: 검증할 프로젝트가 없습니다.");
     return {
       status: "skipped",
       summary: `No project was found for changed files: ${materialized.map((file) => file.path).join(", ")}`,
@@ -119,20 +123,24 @@ export async function validateLineMappedChanges(
   const validationRoot = await createValidationWorkspace(options.root);
   const output: string[] = [];
   try {
+    await options.onStatus?.(`[검증] 임시 작업공간에 변경안 적용 중: ${materialized.length}개 파일`);
     await applyMaterializedFiles(validationRoot, materialized);
     const commands = await resolveCommands(validationRoot, projects);
     if (commands.length === 0) {
+      await options.onStatus?.("[검증] 빌드/테스트 미수행: 지원되는 검증 명령을 찾지 못했습니다.");
       return { status: "skipped", summary: "No supported build/test command was found for affected projects.", output: "", diagnostics: [], projects, commands: [], changedFiles: materialized.map((file) => file.path) };
     }
 
     const diagnostics: ValidationDiagnostic[] = [];
     for (const command of commands) {
       if (options.signal?.aborted) throw new Error("Validation cancelled.");
-      await options.onStatus?.(`${command.kind === "build" ? "Build" : "Test"}: ${command.project.path}`);
+      const operation = command.kind === "build" ? "빌드" : "테스트";
+      await options.onStatus?.(`[검증] ${operation} 수행 중: ${command.project.path}`);
       const result = await runCommand(command, options.signal);
       output.push(`$ ${command.label}\n${result.output}`.trim());
       diagnostics.push(...parseDiagnostics(command.project.path, result.output, result.exitCode));
       if (result.exitCode !== 0) {
+        await options.onStatus?.(`[검증] ${operation} 실패: ${command.project.path} (exit ${result.exitCode})`);
         return {
           status: "failed",
           summary: `${command.label} failed with exit code ${result.exitCode}${result.timedOut ? " (timeout)" : ""}.`,
@@ -143,8 +151,10 @@ export async function validateLineMappedChanges(
           changedFiles: materialized.map((file) => file.path),
         };
       }
+      await options.onStatus?.(`[검증] ${operation} 완료: ${command.project.path}`);
     }
     const hasTests = commands.some((command) => command.kind === "test");
+    await options.onStatus?.(`[검증] 빌드/테스트 검증 완료: ${projects.map((project) => project.path).join(", ")}`);
     return {
       status: "passed",
       summary: hasTests
@@ -158,6 +168,7 @@ export async function validateLineMappedChanges(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await options.onStatus?.(`[검증] 빌드/테스트 실패: ${message}`);
     return {
       status: options.signal?.aborted ? "failed" : "failed",
       summary: `Validation could not be completed: ${message}`,
@@ -252,9 +263,9 @@ async function resolveCommands(root: string, projects: ProjectDescriptor[]): Pro
 function fallbackCommands(root: string, project: ProjectDescriptor, kind: "build" | "test"): CommandSpec[] {
   const projectAbsolute = path.join(root, project.path);
   const projectDirectory = path.join(root, project.directory);
-  if (project.kind === "vcxproj" && kind === "build") return [command("msbuild", [projectAbsolute, "/t:Build", "/m"], projectDirectory, project, kind)];
+  if (project.kind === "vcxproj" && kind === "build") return [command("msbuild", [projectAbsolute, "/t:Build", "/m", "/p:BuildProjectReferences=false"], projectDirectory, project, kind)];
   if (project.kind === "dotnet") {
-    if (kind === "build") return [command("dotnet", ["build", projectAbsolute, "--no-restore"], projectDirectory, project, kind)];
+    if (kind === "build") return [command("dotnet", ["build", projectAbsolute, "--no-restore", "--no-dependencies"], projectDirectory, project, kind)];
     if (project.testProject) return [command("dotnet", ["test", projectAbsolute, "--no-build", "--no-restore"], projectDirectory, project, kind)];
   }
   if (project.kind === "cmake") {
@@ -277,8 +288,16 @@ function toCommand(task: ProcessTask, root: string, project: ProjectDescriptor, 
     .replace(/\$\{workspaceFolder\}/g, root)
     .replace(/\$\{workspaceFolderBasename\}/g, path.basename(root));
   const cwd = replace(task.cwd ?? root);
+  const executable = replace(task.command);
   const args = task.args.map(replace);
-  return command(replace(task.command), args, cwd, project, kind);
+  const executableName = path.basename(executable).toLowerCase();
+  if (kind === "build" && project.kind === "vcxproj" && ["msbuild", "msbuild.exe"].includes(executableName) && !args.some((arg) => /buildprojectreferences\s*=\s*/i.test(arg))) {
+    args.push("/p:BuildProjectReferences=false");
+  }
+  if (kind === "build" && project.kind === "dotnet" && executableName === "dotnet" && !args.includes("--no-dependencies")) {
+    args.push("--no-dependencies");
+  }
+  return command(executable, args, cwd, project, kind);
 }
 
 interface ProcessTask {
@@ -320,9 +339,12 @@ function findTask(tasks: ProcessTask[], project: ProjectDescriptor, kind: "build
 export function taskTargetsProject(label: string, commandValue: string, args: string[], projectPathValue: string): boolean {
   const basename = path.basename(projectPathValue).toLowerCase();
   const projectPath = normalize(projectPathValue).toLowerCase();
-  return [label, commandValue, ...args]
+  void label;
+  const values = [commandValue, ...args]
     .map((value) => normalize(value).toLowerCase())
-    .some((value) => value.includes(projectPath) || value.includes(basename));
+  const targets = values.flatMap((value) => Array.from(value.matchAll(/[^\s"']+\.(?:slnx?|vcxproj|csproj|fsproj|vbproj)/gi), (match) => match[0]));
+  if (targets.some((target) => !target.endsWith(projectPath) && path.posix.basename(target) !== basename)) return false;
+  return values.some((value) => value.includes(projectPath) || value.includes(basename));
 }
 
 export function isSafeValidationCommand(executable: string, args: string[]): boolean {

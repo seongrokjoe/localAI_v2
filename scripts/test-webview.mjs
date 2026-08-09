@@ -139,6 +139,12 @@ click("send");
 
 const onMessage = windowListeners.get("message");
 assert.ok(onMessage, "window message listener must be registered");
+onMessage({ data: { type: "operation", text: "[validation] build running: app/app.vcxproj" } });
+assert.equal(
+  elements.get("messages").children.some((element) => element.className === "message operation" && element.textContent.includes("build running")),
+  true,
+  "validation operation messages must remain visible in chat",
+);
 onMessage({ data: { type: "planActions", text: "계획 내용" } });
 clickCreatedButton("계획 구현");
 onMessage({ data: { type: "workbenchOffer" } });

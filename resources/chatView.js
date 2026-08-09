@@ -38,6 +38,7 @@ window.addEventListener("message", (event) => {
   if (message.type === "status") setStatus(message.text);
   if (message.type === "user") appendMessage("user", message.text);
   if (message.type === "assistant") appendMessage("assistant", message.text);
+  if (message.type === "operation") appendOperation(message.text);
   if (message.type === "assistantStart") startAssistant(message.text ?? "실행 중");
   if (message.type === "assistantDelta" && currentAssistant) {
     assistantBuffer += message.text ?? "";
@@ -75,6 +76,11 @@ function appendMessage(kind, text, followOverride) {
   messages.appendChild(element);
   scrollMessagesToBottom(shouldFollow);
   return element;
+}
+
+function appendOperation(text) {
+  if (!text) return;
+  appendMessage("operation", text);
 }
 
 function startAssistant(phase) {

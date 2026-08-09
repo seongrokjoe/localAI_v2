@@ -353,7 +353,7 @@ export class CodeAgent {
     };
     const projectOverrides: Record<string, string> = {};
     for (let attempt = 1; attempt <= 3; attempt++) {
-      await onStatus?.(`임시 프로젝트 검증 중 (${attempt}/3)`);
+      await onStatus?.(`[검증] 임시 프로젝트 검증 시작 (${attempt}/3)`);
       validation = await validateLineMappedChanges(candidate, snapshots, { root, signal, onStatus, projectOverrides });
       this.output.appendLine(`[자동 검증] ${attempt}/3: ${validation.summary}`);
       if (validation.output) this.output.appendLine(validation.output);
@@ -378,7 +378,7 @@ export class CodeAgent {
       if (validation.status === "passed" || validation.status === "skipped" || attempt === 3) break;
       if (signal?.aborted) throw new vscode.CancellationError();
 
-      await onStatus?.(`빌드/테스트 오류를 LLM에 전달하여 수정안 재생성 중 (${attempt}/3)`);
+      await onStatus?.(`[검증] 실패 원인을 LLM에 전달하여 수정안 재생성 중 (${attempt}/3)`);
       const repaired = await this.requestLineMappedRepair(prompt, candidate, validation, sourceContext, config, signal);
       if (repaired.length === 0) break;
       candidate = deduplicateLineChanges(repaired).map((change, index) => ({
