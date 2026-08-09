@@ -271,6 +271,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.view?.webview.postMessage({ type: "status", text: "변경 작업대 여는 중" });
           const state = await this.changeWorkbench.create(prompt, displayResponse, result.changeBlocks, result.sourceSnapshots);
           this.postWorkbenchState(state);
+          this.view?.webview.postMessage({
+            type: "status",
+            text: result.validation?.status === "passed" ? "Validated change candidate is ready for review." : "Last change candidate is unverified; review validation diagnostics before applying.",
+          });
           this.view?.webview.postMessage({ type: "assistant", text: `코드 변경 블록 ${result.changeBlocks.length}개를 변경 작업대에 열었습니다.` });
           this.view?.webview.postMessage({ type: "status", text: "변경 작업대 편집 중" });
         } else {

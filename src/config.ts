@@ -16,7 +16,7 @@ export function readSettings(): ExtensionSettings {
     allowedServerHosts: config.get<string[]>("allowedServerHosts", []),
     toolCallMode: parseToolCallMode(toolCallMode),
     requestTimeoutMs: clamp(config.get<number>("requestTimeoutMs", 120000), 10000, 600000),
-    enableCommandRunner: config.get<boolean>("enableCommandRunner", false),
+    enableCommandRunner: config.get<boolean>("enableCommandRunner", true),
   };
 }
 

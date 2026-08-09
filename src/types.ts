@@ -1,3 +1,4 @@
+import type { ValidationRunResult } from "./projectValidation";
 export type ToolCallMode = "auto" | "native" | "json" | "disabled";
 export type AgentMode = "plan" | "implement";
 export type ChatRole = "user" | "assistant";
@@ -137,6 +138,7 @@ export interface AgentRunResult {
   changeBlocks: LineMappedChange[];
   sourceSnapshots: SourceSnapshot[];
   issues: string[];
+  validation?: ValidationRunResult;
 }
 
 export type WorkbenchMappingStatus = "mapped" | "needs-file" | "needs-range" | "stale";

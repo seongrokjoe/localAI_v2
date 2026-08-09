@@ -207,7 +207,7 @@
         },
         "companyCodeAI.enableCommandRunner": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "markdownDescription": "감지된 프로젝트의 로컬 build/test 검증 명령을 실행합니다. 임의 shell 명령은 실행하지 않습니다."
         }
       }
@@ -250,7 +250,8 @@
     "test:proposal": "npm run compile && node scripts/test-proposal-text.mjs",
     "test:webview": "node scripts/test-webview.mjs",
     "test:workbench": "npm run compile && node scripts/test-change-blocks.mjs && node scripts/test-change-workbench-webview.mjs",
-    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
+    "test:validation": "npm run compile && node scripts/test-project-validation.mjs",
+    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",

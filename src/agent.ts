@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import { createHash, randomBytes } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import {
   AgentMode,
   AgentRunResult,
@@ -24,6 +26,8 @@ import { parsePatchResponse, parseTargetResponse } from "./patchProtocol";
 import { isLineRangeChange } from "./patchText";
 import { extractReplacementContent } from "./proposalText";
 import { parseLineChangeResponse, renderNumberedFile } from "./lineChangeProtocol";
+import { validateLineMappedChanges, ValidationRunResult } from "./projectValidation";
+import { discoverProjectGraph } from "./projectGraph";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -51,6 +55,7 @@ const modePrompts: Record<AgentMode, string> = {
 
 export class CodeAgent {
   private lastRunAppliedWorkspaceChange = false;
+  private lastAutomaticValidation?: ValidationRunResult;
 
   constructor(
     private readonly tools: WorkspaceTools,
@@ -226,10 +231,11 @@ export class CodeAgent {
   ): Promise<AgentRunResult> {
     await onStatus?.("구현 대상 파일 확인 중");
     const uris = await this.collectImplementationUris(contextItems);
-    const snapshots = await this.createSourceSnapshots(uris);
+    const snapshots = await this.expandImplementationSnapshots(await this.createSourceSnapshots(uris));
     const implementationPrompt = truncateToTokens(prompt, 30000);
     const memory = truncateToTokens(renderMemory(options), 10000);
     const summary = truncateToTokens(await readSummaryForContext(10000), 10000);
+    const previousValidation = this.lastAutomaticValidation ? truncateToTokens(renderValidationFailure(this.lastAutomaticValidation), 12000) : "";
     const batches = buildImplementationBatches(snapshots, implementationPrompt, memory, summary);
     const client = new LlmClient(config);
     const changes: AgentRunResult["changeBlocks"] = [];
@@ -247,6 +253,7 @@ export class CodeAgent {
             "아래 프로젝트 정보와 줄 번호가 포함된 원본 파일만 근거로 요청을 구현하세요.",
             memory ? `<memory>\n${memory}\n</memory>` : "",
             summary ? `<projectSummary>\n${summary}\n</projectSummary>` : "",
+            previousValidation ? `<previousValidation>\n${previousValidation}\n</previousValidation>` : "",
             `<request>\n${implementationPrompt}\n</request>`,
             batches[index].join("\n\n"),
           ].filter(Boolean).join("\n\n"),
@@ -267,10 +274,31 @@ export class CodeAgent {
       }
     }
 
-    const uniqueChanges = deduplicateLineChanges(changes).map((change, index) => ({
+    let uniqueChanges = deduplicateLineChanges(changes).map((change, index) => ({
       ...change,
       id: `${change.protocolId}-${String(index + 1).padStart(4, "0")}`,
     }));
+    let validation: ValidationRunResult | undefined;
+    if (config.enableCommandRunner && uniqueChanges.length > 0) {
+      const validated = await this.validateAndRepairLineChanges(
+        implementationPrompt,
+        snapshots,
+        uniqueChanges,
+        config,
+        signal,
+        onStatus,
+        batches.flat().join("\n\n"),
+      );
+      uniqueChanges = validated.changes;
+      validation = validated.validation;
+      this.lastAutomaticValidation = validation;
+      if (validation.status !== "passed") {
+        issues.push(`Workspace validation: ${validation.summary}`);
+        if (validation.diagnostics.length > 0) {
+          issues.push(...validation.diagnostics.slice(0, 20).map((diagnostic) => formatValidationDiagnostic(diagnostic)));
+        }
+      }
+    }
     const summaryLines = uniqueChanges.map((change) => {
       const source = snapshots.find((snapshot) => snapshot.id === change.fileId);
       const target = change.operation === "create_file" ? change.path ?? "새 파일" : (source?.path ?? change.fileId) || "매핑되지 않은 파일";
@@ -282,7 +310,123 @@ export class CodeAgent {
       ...summaryLines,
       issues.length > 0 ? `\n확인 필요:\n${issues.map((issue) => `- ${issue}`).join("\n")}` : "",
     ].filter(Boolean).join("\n");
-    return { content, changeBlocks: uniqueChanges, sourceSnapshots: snapshots, issues };
+    const validationSummary = validation
+      ? `\n\n${renderValidationOverview(validation)}${validation.status === "failed" ? "\nThe last candidate is unverified." : ""}${validation.status === "failed" && validation.output ? `\n\n<validationOutput>\n${truncateToTokens(validation.output, 12000)}\n</validationOutput>` : ""}`
+      : "";
+    return { content: `${content}${validationSummary}`, changeBlocks: uniqueChanges, sourceSnapshots: snapshots, issues, validation };
+  }
+
+  private async validateAndRepairLineChanges(
+    prompt: string,
+    snapshots: SourceSnapshot[],
+    initialChanges: AgentRunResult["changeBlocks"],
+    config: RuntimeConfig,
+    signal: AbortSignal | undefined,
+    onStatus: ((text: string) => void | Promise<void>) | undefined,
+    sourceContext: string,
+  ): Promise<{ changes: AgentRunResult["changeBlocks"]; validation: ValidationRunResult }> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) {
+      return {
+        changes: initialChanges,
+        validation: {
+          status: "skipped",
+          summary: "No workspace folder is open.",
+          output: "",
+          diagnostics: [],
+          projects: [],
+          commands: [],
+          changedFiles: [],
+        },
+      };
+    }
+
+    let candidate = initialChanges;
+    let validation: ValidationRunResult = {
+      status: "skipped",
+      summary: "Validation did not start.",
+      output: "",
+      diagnostics: [],
+      projects: [],
+      commands: [],
+      changedFiles: [],
+    };
+    const projectOverrides: Record<string, string> = {};
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await onStatus?.(`임시 프로젝트 검증 중 (${attempt}/3)`);
+      validation = await validateLineMappedChanges(candidate, snapshots, { root, signal, onStatus, projectOverrides });
+      this.output.appendLine(`[자동 검증] ${attempt}/3: ${validation.summary}`);
+      if (validation.output) this.output.appendLine(validation.output);
+      if (validation.status === "skipped" && validation.projectCandidates && Object.keys(validation.projectCandidates).length > 0) {
+        let selectedAll = true;
+        for (const [file, candidates] of Object.entries(validation.projectCandidates)) {
+          const selected = await vscode.window.showQuickPick(candidates, {
+            title: `Select the project containing ${file}`,
+            placeHolder: "The changed file belongs to more than one project.",
+          });
+          if (!selected) {
+            selectedAll = false;
+            break;
+          }
+          projectOverrides[file] = selected;
+        }
+        if (selectedAll) {
+          attempt--;
+          continue;
+        }
+      }
+      if (validation.status === "passed" || validation.status === "skipped" || attempt === 3) break;
+      if (signal?.aborted) throw new vscode.CancellationError();
+
+      await onStatus?.(`빌드/테스트 오류를 LLM에 전달하여 수정안 재생성 중 (${attempt}/3)`);
+      const repaired = await this.requestLineMappedRepair(prompt, candidate, validation, sourceContext, config, signal);
+      if (repaired.length === 0) break;
+      candidate = deduplicateLineChanges(repaired).map((change, index) => ({
+        ...change,
+        id: `${change.protocolId}-${String(index + 1).padStart(4, "0")}`,
+      }));
+    }
+    return { changes: candidate, validation };
+  }
+
+  private async requestLineMappedRepair(
+    prompt: string,
+    currentChanges: AgentRunResult["changeBlocks"],
+    validation: ValidationRunResult,
+    sourceContext: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<AgentRunResult["changeBlocks"]> {
+    const protocolId = `P${randomBytes(6).toString("hex").toUpperCase()}`;
+    const client = new LlmClient(config);
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const relatedProjectContext = root ? await readRelatedProjectContext(root, validation.projects) : "";
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content: [
+          implementationProtocolPrompt(protocolId),
+          "The previous candidate was applied in an isolated workspace and failed build or test.",
+          "Return a complete corrected set of CCA change blocks, including all dependent header or project-file changes that are required.",
+          "Do not return explanations outside the CCA protocol.",
+        ].join("\n\n"),
+      },
+      {
+        role: "user",
+        content: [
+          `<request>\n${prompt}\n</request>`,
+          `<sourceContext>\n${truncateToTokens(sourceContext, 90000)}\n</sourceContext>`,
+          relatedProjectContext ? `<relatedProjectContext>\n${truncateToTokens(relatedProjectContext, 30000)}\n</relatedProjectContext>` : "",
+          `<currentCandidate>\n${truncateToTokens(renderCandidateChanges(currentChanges), 10000)}\n</currentCandidate>`,
+          `<validationFailure>\n${truncateToTokens(renderValidationFailure(validation), 20000)}\n</validationFailure>`,
+          "Generate the corrected complete change set now.",
+        ].join("\n\n"),
+      },
+    ];
+    const result = await client.complete({ messages, signal, onDelta: () => undefined });
+    const parsed = parseLineChangeResponse(result.content, protocolId);
+    this.output.appendLine(`[자동 수정] ${parsed.changes.length}개 변경 블록 생성, 경고 ${parsed.issues.length}개`);
+    return parsed.changes;
   }
 
   private async collectImplementationUris(contextItems: ContextItem[]): Promise<vscode.Uri[]> {
@@ -329,6 +473,51 @@ export class CodeAgent {
         text,
         lineCount: document.lineCount,
       });
+    }
+    return snapshots;
+  }
+
+  private async expandImplementationSnapshots(initial: SourceSnapshot[]): Promise<SourceSnapshot[]> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return initial;
+    const graph = await discoverProjectGraph(root, initial.map((snapshot) => snapshot.path));
+    const paths = new Set(initial.map((snapshot) => snapshot.path.replace(/\\/g, "/")));
+    for (const project of [...graph.changedProjects, ...graph.dependentProjects]) {
+      paths.add(project.path);
+      for (const source of project.sourceFiles) {
+        if (!source.includes("*") && isImplementationContextPath(source)) paths.add(source);
+      }
+    }
+    for (const snapshot of initial) {
+      for (const include of extractLocalIncludes(snapshot.text)) {
+        const candidate = path.posix.normalize(path.posix.join(path.posix.dirname(snapshot.path), include));
+        if (!candidate.startsWith("../") && await fileExists(path.join(root, candidate))) paths.add(candidate);
+      }
+    }
+    const snapshots = [...initial];
+    let usedChars = snapshots.reduce((total, snapshot) => total + snapshot.text.length, 0);
+    for (const relativePath of paths) {
+      if (snapshots.some((snapshot) => snapshot.path === relativePath) || snapshots.length >= 120 || usedChars >= 600000) continue;
+      const uri = vscode.Uri.file(path.join(root, relativePath));
+      try {
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (document.isDirty || !isImplementationContextPath(relativePath)) continue;
+        const text = document.getText();
+        if (text.length > 120000) continue;
+        const snapshot: SourceSnapshot = {
+          id: `F${String(snapshots.length + 1).padStart(3, "0")}`,
+          path: relativePath,
+          uri: uri.toString(),
+          snapshot: hashText(text),
+          languageId: document.languageId,
+          text,
+          lineCount: document.lineCount,
+        };
+        snapshots.push(snapshot);
+        usedChars += text.length;
+      } catch {
+        // A generated or unavailable project item is left for the compiler diagnostics to explain.
+      }
     }
     return snapshots;
   }
@@ -604,6 +793,9 @@ export class CodeAgent {
     addSection("projectSummary", await readSummaryForContext(50000), 50000);
     addSection("workspaceFiles", (await this.safeListFiles()).join("\n"), 12000);
     addSection("gitDiff", await this.tools.getGitDiff(120000), 30000);
+    if (this.lastAutomaticValidation) {
+      addSection("lastAutomaticValidation", renderValidationFailure(this.lastAutomaticValidation), 30000);
+    }
     const validation = this.tools.lastValidationResult;
     if (validation) {
       addSection("workspaceValidation", [
@@ -986,6 +1178,77 @@ function deduplicateLineChanges(changes: AgentRunResult["changeBlocks"]): AgentR
     seen.add(key);
     return true;
   });
+}
+
+function renderCandidateChanges(changes: AgentRunResult["changeBlocks"]): string {
+  return changes.map((change) => [
+    `file=${change.fileId || "NEW"} path=${change.path ?? ""} operation=${change.operation} lines=${change.startLine}-${change.endLine}`,
+    change.code,
+  ].join("\n")).join("\n\n");
+}
+
+function renderValidationFailure(validation: ValidationRunResult): string {
+  return [
+    validation.summary,
+    validation.commands.join("\n"),
+    validation.diagnostics.map((diagnostic) => formatValidationDiagnostic(diagnostic)).join("\n"),
+    validation.output,
+  ].filter(Boolean).join("\n\n");
+}
+
+function renderValidationOverview(validation: ValidationRunResult): string {
+  return [
+    `Validation: ${validation.summary}`,
+    validation.changedFiles.length > 0 ? `Changed files:\n${validation.changedFiles.map((file) => `- ${file}`).join("\n")}` : "",
+    validation.projects.length > 0 ? `Selected projects:\n${validation.projects.map((project) => `- ${project.path}`).join("\n")}` : "",
+    validation.commands.length > 0 ? `Commands:\n${validation.commands.map((command) => `- ${command}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function formatValidationDiagnostic(diagnostic: ValidationRunResult["diagnostics"][number]): string {
+  const location = diagnostic.file ? `${diagnostic.file}${diagnostic.line ? `:${diagnostic.line}` : ""}${diagnostic.column ? `:${diagnostic.column}` : ""}` : diagnostic.project;
+  return `[${diagnostic.severity}] ${location}: ${diagnostic.message}`;
+}
+
+function isImplementationContextPath(value: string): boolean {
+  return path.basename(value).toLowerCase() === "cmakelists.txt" || /\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ixx|m|mm|cs|fs|vb|xaml|vcxproj|csproj|sln|slnx|props|targets|json|cmake)$/i.test(value);
+}
+
+function extractLocalIncludes(content: string): string[] {
+  return Array.from(content.matchAll(/^\s*#\s*include\s*["<]([^">]+)[">]/gm)).map((match) => match[1]).filter((value) => !value.includes("/../"));
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readRelatedProjectContext(root: string, projects: ValidationRunResult["projects"]): Promise<string> {
+  const paths = new Set<string>();
+  for (const project of projects) {
+    paths.add(project.path);
+    for (const source of project.sourceFiles) {
+      if (/\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ixx|cs|fs|vb|xaml)$/i.test(source)) paths.add(source);
+    }
+  }
+  const sections: string[] = [];
+  let used = 0;
+  for (const relative of paths) {
+    if (used >= 180000) break;
+    try {
+      const content = await fs.readFile(path.join(root, relative), "utf8");
+      const section = `--- ${relative} ---\n${truncateToTokens(content, 10000)}`;
+      sections.push(section);
+      used += estimateTokens(section);
+    } catch {
+      // A generated or missing project item is reported by the build output.
+    }
+  }
+  return sections.join("\n\n");
 }
 
 function hashText(content: string): string {
