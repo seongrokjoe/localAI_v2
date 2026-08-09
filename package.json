@@ -251,7 +251,7 @@
     "test:webview": "node scripts/test-webview.mjs",
     "test:workbench": "npm run compile && node scripts/test-change-blocks.mjs && node scripts/test-change-workbench-webview.mjs",
     "test:validation": "npm run compile && node scripts/test-project-validation.mjs",
-    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
+    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-context-transmission.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",

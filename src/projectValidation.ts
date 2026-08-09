@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import type { LineMappedChange, SourceSnapshot } from "./types";
 import { lineOperationOffsets, replacementForLineChange } from "./lineChangeMapping";
 import { discoverProjectGraph, ProjectDescriptor } from "./projectGraph";
+import { discoverVisualStudioMsBuild, isMsb4278 } from "./msbuildDiscovery";
 
 export interface ValidationDiagnostic {
   project: string;
@@ -16,7 +17,8 @@ export interface ValidationDiagnostic {
 }
 
 export interface ValidationRunResult {
-  status: "passed" | "failed" | "skipped";
+  status: "passed" | "failed" | "skipped" | "unavailable";
+  failureKind?: "candidate" | "environment";
   summary: string;
   output: string;
   diagnostics: ValidationDiagnostic[];
@@ -51,6 +53,11 @@ interface CommandResult {
   exitCode: number;
   output: string;
   timedOut: boolean;
+}
+
+interface ResolvedCommands {
+  commands: CommandSpec[];
+  unavailableReason?: string;
 }
 
 const commandTimeoutMs = 180000;
@@ -125,7 +132,21 @@ export async function validateLineMappedChanges(
   try {
     await options.onStatus?.(`[검증] 임시 작업공간에 변경안 적용 중: ${materialized.length}개 파일`);
     await applyMaterializedFiles(validationRoot, materialized);
-    const commands = await resolveCommands(validationRoot, projects);
+    const resolved = await resolveCommands(validationRoot, projects);
+    const commands = resolved.commands;
+    if (resolved.unavailableReason) {
+      await options.onStatus?.(`[검증] 빌드/테스트 미검증: ${resolved.unavailableReason}`);
+      return {
+        status: "unavailable",
+        failureKind: "environment",
+        summary: resolved.unavailableReason,
+        output: "",
+        diagnostics: [{ project: projects.map((project) => project.path).join(", "), severity: "tool-error", message: resolved.unavailableReason }],
+        projects,
+        commands: [],
+        changedFiles: materialized.map((file) => file.path),
+      };
+    }
     if (commands.length === 0) {
       await options.onStatus?.("[검증] 빌드/테스트 미수행: 지원되는 검증 명령을 찾지 못했습니다.");
       return { status: "skipped", summary: "No supported build/test command was found for affected projects.", output: "", diagnostics: [], projects, commands: [], changedFiles: materialized.map((file) => file.path) };
@@ -140,9 +161,26 @@ export async function validateLineMappedChanges(
       output.push(`$ ${command.label}\n${result.output}`.trim());
       diagnostics.push(...parseDiagnostics(command.project.path, result.output, result.exitCode));
       if (result.exitCode !== 0) {
+        if (isMsb4278(result.output) || result.exitCode === -1) {
+          const message = isMsb4278(result.output)
+            ? "MSB4278: C++ 프로젝트를 빌드할 Visual Studio MSBuild.exe 또는 C++ Build Tools 구성요소를 사용할 수 없습니다. dotnet build로는 .vcxproj를 검증할 수 없습니다."
+            : `빌드 실행 파일을 시작할 수 없습니다: ${command.executable}`;
+          await options.onStatus?.(`[검증] 빌드 환경 오류: ${message}`);
+          return {
+            status: "unavailable",
+            failureKind: "environment",
+            summary: message,
+            output: output.join("\n\n").slice(-80000),
+            diagnostics: [...diagnostics, { project: command.project.path, severity: "tool-error", message }],
+            projects,
+            commands: commands.map((item) => item.label),
+            changedFiles: materialized.map((file) => file.path),
+          };
+        }
         await options.onStatus?.(`[검증] ${operation} 실패: ${command.project.path} (exit ${result.exitCode})`);
         return {
           status: "failed",
+          failureKind: "candidate",
           summary: `${command.label} failed with exit code ${result.exitCode}${result.timedOut ? " (timeout)" : ""}.`,
           output: output.join("\n\n").slice(-80000),
           diagnostics,
@@ -246,24 +284,34 @@ async function applyMaterializedFiles(root: string, files: MaterializedFile[]): 
   }
 }
 
-async function resolveCommands(root: string, projects: ProjectDescriptor[]): Promise<CommandSpec[]> {
+async function resolveCommands(root: string, projects: ProjectDescriptor[]): Promise<ResolvedCommands> {
   const commands: CommandSpec[] = [];
   const tasks = await readProcessTasks(root);
+  let visualStudioMsBuild: string | undefined;
   for (const project of projects) {
-    const buildTask = findTask(tasks, project, "build");
+    let buildTask = findTask(tasks, project, "build");
     const testTask = findTask(tasks, project, "test");
-    if (buildTask) commands.push(toCommand(buildTask, root, project, "build"));
-    else commands.push(...fallbackCommands(root, project, "build"));
+    if (project.kind === "vcxproj" && buildTask && !isVcxprojBuildExecutable(buildTask.command)) buildTask = undefined;
+    if (project.kind === "vcxproj" && (!buildTask || ["msbuild", "msbuild.exe"].includes(path.basename(buildTask.command).toLowerCase()))) {
+      const configured = buildTask ? replaceTaskValue(buildTask.command, root) : undefined;
+      if (configured && path.isAbsolute(configured) && path.basename(configured).toLowerCase() === "msbuild.exe") visualStudioMsBuild = configured;
+      visualStudioMsBuild ??= await discoverVisualStudioMsBuild();
+      if (!visualStudioMsBuild) {
+        return { commands: [], unavailableReason: "Visual Studio C++용 MSBuild.exe를 찾지 못했습니다. Visual Studio Installer에서 Desktop development with C++ 또는 C++ Build Tools를 설치해야 합니다." };
+      }
+    }
+    if (buildTask) commands.push(toCommand(buildTask, root, project, "build", visualStudioMsBuild));
+    else commands.push(...fallbackCommands(root, project, "build", visualStudioMsBuild));
     if (testTask) commands.push(toCommand(testTask, root, project, "test"));
-    else commands.push(...fallbackCommands(root, project, "test"));
+    else commands.push(...fallbackCommands(root, project, "test", visualStudioMsBuild));
   }
-  return deduplicateCommands(commands);
+  return { commands: deduplicateCommands(commands) };
 }
 
-function fallbackCommands(root: string, project: ProjectDescriptor, kind: "build" | "test"): CommandSpec[] {
+function fallbackCommands(root: string, project: ProjectDescriptor, kind: "build" | "test", visualStudioMsBuild?: string): CommandSpec[] {
   const projectAbsolute = path.join(root, project.path);
   const projectDirectory = path.join(root, project.directory);
-  if (project.kind === "vcxproj" && kind === "build") return [command("msbuild", [projectAbsolute, "/t:Build", "/m", "/p:BuildProjectReferences=false"], projectDirectory, project, kind)];
+  if (project.kind === "vcxproj" && kind === "build" && visualStudioMsBuild) return [command(visualStudioMsBuild, [projectAbsolute, "/t:Build", "/m", "/p:BuildProjectReferences=false"], projectDirectory, project, kind)];
   if (project.kind === "dotnet") {
     if (kind === "build") return [command("dotnet", ["build", projectAbsolute, "--no-restore", "--no-dependencies"], projectDirectory, project, kind)];
     if (project.testProject) return [command("dotnet", ["test", projectAbsolute, "--no-build", "--no-restore"], projectDirectory, project, kind)];
@@ -283,12 +331,11 @@ function command(executable: string, args: string[], cwd: string, project: Proje
   return { executable, args, cwd, project, kind, label: `${executable} ${args.join(" ")}` };
 }
 
-function toCommand(task: ProcessTask, root: string, project: ProjectDescriptor, kind: "build" | "test"): CommandSpec {
-  const replace = (value: string): string => value
-    .replace(/\$\{workspaceFolder\}/g, root)
-    .replace(/\$\{workspaceFolderBasename\}/g, path.basename(root));
+function toCommand(task: ProcessTask, root: string, project: ProjectDescriptor, kind: "build" | "test", visualStudioMsBuild?: string): CommandSpec {
+  const replace = (value: string): string => replaceTaskValue(value, root);
   const cwd = replace(task.cwd ?? root);
-  const executable = replace(task.command);
+  let executable = replace(task.command);
+  if (project.kind === "vcxproj" && ["msbuild", "msbuild.exe"].includes(path.basename(executable).toLowerCase()) && visualStudioMsBuild) executable = visualStudioMsBuild;
   const args = task.args.map(replace);
   const executableName = path.basename(executable).toLowerCase();
   if (kind === "build" && project.kind === "vcxproj" && ["msbuild", "msbuild.exe"].includes(executableName) && !args.some((arg) => /buildprojectreferences\s*=\s*/i.test(arg))) {
@@ -298,6 +345,14 @@ function toCommand(task: ProcessTask, root: string, project: ProjectDescriptor, 
     args.push("--no-dependencies");
   }
   return command(executable, args, cwd, project, kind);
+}
+
+function replaceTaskValue(value: string, root: string): string {
+  return value.replace(/\$\{workspaceFolder\}/g, root).replace(/\$\{workspaceFolderBasename\}/g, path.basename(root));
+}
+
+export function isVcxprojBuildExecutable(executable: string): boolean {
+  return !["dotnet", "dotnet.exe"].includes(path.basename(executable).toLowerCase());
 }
 
 interface ProcessTask {

@@ -251,7 +251,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         () => undefined,
         this.abortController.signal,
         (status) => {
-          if (status.startsWith("[검증]")) {
+          if (status.startsWith("[검증]") || status.startsWith("[컨텍스트]")) {
             this.view?.webview.postMessage({ type: "operation", text: status });
           }
           this.view?.webview.postMessage({ type: "status", text: status });
@@ -279,6 +279,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               ? "[검증 결과] 빌드/테스트를 통과한 변경안입니다."
               : result.validation?.status === "failed"
                 ? "[검증 결과] 빌드/테스트가 실패한 변경안입니다. 오류 내용을 확인하세요."
+                : result.validation?.status === "unavailable"
+                  ? `[검증 결과] 빌드 환경을 사용할 수 없어 미검증 상태입니다. ${result.validation.summary}`
                 : "[검증 결과] 빌드/테스트가 수행되지 않은 변경안입니다. 검증 설정과 프로젝트 매핑을 확인하세요.",
           });
           this.view?.webview.postMessage({ type: "assistant", text: `코드 변경 블록 ${result.changeBlocks.length}개를 변경 작업대에 열었습니다.` });

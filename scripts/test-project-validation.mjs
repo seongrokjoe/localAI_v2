@@ -7,7 +7,8 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const { discoverProjectGraph } = require("../dist/projectGraph.js");
-const { materializeChanges, isSafeValidationCommand, taskTargetsProject, validateLineMappedChanges } = require("../dist/projectValidation.js");
+const { materializeChanges, isSafeValidationCommand, isVcxprojBuildExecutable, taskTargetsProject, validateLineMappedChanges } = require("../dist/projectValidation.js");
+const { discoverVisualStudioMsBuild, isMsb4278 } = require("../dist/msbuildDiscovery.js");
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "company-code-ai-project-test-"));
 try {
@@ -60,6 +61,19 @@ try {
   assert.equal(taskTargetsProject("Build lib.vcxproj", process.execPath, ["-e", "process.exit(0)"], "lib/lib.vcxproj"), false);
   assert.equal(taskTargetsProject("Build selected", "msbuild", ["${workspaceFolder}\\lib\\lib.vcxproj"], "lib/lib.vcxproj"), true);
   assert.equal(taskTargetsProject("Build selected", "msbuild", ["workspace.sln", "lib/lib.vcxproj"], "lib/lib.vcxproj"), false);
+  assert.equal(isVcxprojBuildExecutable("dotnet.exe"), false);
+  assert.equal(isVcxprojBuildExecutable("MSBuild.exe"), true);
+  assert.equal(isMsb4278("error MSB4278: imported project is unavailable"), true);
+
+  const directMsBuild = await discoverVisualStudioMsBuild({ platform: "win32", env: { MSBUILD_EXE_PATH: "C:\\VS\\MSBuild.exe" }, exists: async (file) => file === "C:\\VS\\MSBuild.exe" });
+  assert.equal(directMsBuild, "C:\\VS\\MSBuild.exe");
+  const locatedMsBuild = await discoverVisualStudioMsBuild({
+    platform: "win32",
+    env: { "ProgramFiles(x86)": "C:\\PF86" },
+    exists: async (file) => file.endsWith("vswhere.exe") || file === "C:\\VS2022\\MSBuild.exe",
+    runVswhere: async () => ["C:\\VS2022\\MSBuild.exe"],
+  });
+  assert.equal(locatedMsBuild, "C:\\VS2022\\MSBuild.exe");
 
   await write(root, ".vscode/tasks.json", JSON.stringify({ version: "2.0.0", tasks: [
     { label: "Build lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "if (require('fs').existsSync('.git') || !require('fs').readFileSync('lib/src/core.cpp','utf8').includes('newCore')) process.exit(2)", "lib/lib.vcxproj"], group: "build" },
@@ -99,6 +113,17 @@ try {
   }], [snapshot], { root });
   assert.equal(failed.status, "failed");
   assert.match(failed.output, /core\.cpp/);
+
+  await write(root, ".vscode/tasks.json", JSON.stringify({ version: "2.0.0", tasks: [
+    { label: "Build lib.vcxproj", type: "process", command: process.execPath, args: ["-e", "process.stderr.write('error MSB4278: use MSBuild.exe'); process.exit(1)", "lib/lib.vcxproj"], group: "build" },
+  ] }));
+  const unavailable = await validateLineMappedChanges([{
+    id: "C001", protocolId: "P001", fileId: "F001", snapshot: snapshot.snapshot,
+    operation: "replace", startLine: 2, endLine: 2, code: "newCore();",
+  }], [snapshot], { root });
+  assert.equal(unavailable.status, "unavailable");
+  assert.equal(unavailable.failureKind, "environment");
+  assert.match(unavailable.summary, /MSB4278/);
 
   console.log("Project graph and validation materialization tests passed.");
 } finally {
