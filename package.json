@@ -28,6 +28,7 @@
     "onCommand:companyCodeAI.clearActiveScope",
     "onCommand:companyCodeAI.reviewLastAIChange",
     "onCommand:companyCodeAI.showLastPatchDiagnostics",
+    "onCommand:companyCodeAI.validateWorkspace",
     "onCommand:companyCodeAI.initProjectSummary",
     "onCommand:companyCodeAI.refreshProjectSummary",
     "onCommand:companyCodeAI.openProjectSummary",
@@ -99,6 +100,10 @@
       {
         "command": "companyCodeAI.showLastPatchDiagnostics",
         "title": "Company Code AI: 마지막 패치 진단 보기"
+      },
+      {
+        "command": "companyCodeAI.validateWorkspace",
+        "title": "Company Code AI: Build/Test Validate"
       },
       {
         "command": "companyCodeAI.initProjectSummary",
@@ -203,7 +208,7 @@
         "companyCodeAI.enableCommandRunner": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "향후 검토된 명령 실행기를 위한 예약 설정입니다. v1 확장은 임의 shell 명령을 실행하지 않습니다."
+          "markdownDescription": "감지된 프로젝트의 로컬 build/test 검증 명령을 실행합니다. 임의 shell 명령은 실행하지 않습니다."
         }
       }
     },

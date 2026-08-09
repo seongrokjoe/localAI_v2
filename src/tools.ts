@@ -10,6 +10,7 @@ import {
   PatchApplyOutcome,
   PatchTargetResult,
   WorkspacePatchChange,
+  WorkspaceValidationResult,
 } from "./types";
 import { assertSafePathSegment } from "./security";
 import { decodeText, detectTextEncoding, encodeText, encodingForNewFile, TextEncodingInfo } from "./textEncoding";
@@ -50,6 +51,8 @@ interface PreparedPatchTarget {
 
 export class WorkspaceTools {
   private activeScope?: string;
+  private commandRunnerEnabled = false;
+  private lastValidation?: WorkspaceValidationResult;
   private lastOutcome?: PatchApplyOutcome;
   private lastDiagnostics: string[] = [];
 
@@ -62,6 +65,10 @@ export class WorkspaceTools {
     return this.lastOutcome;
   }
 
+  get lastValidationResult(): WorkspaceValidationResult | undefined {
+    return this.lastValidation;
+  }
+
   showLastPatchDiagnostics(): void {
     this.output.show(true);
     if (this.lastDiagnostics.length === 0) {
@@ -71,6 +78,10 @@ export class WorkspaceTools {
 
   setActiveScope(scope: string | undefined): void {
     this.activeScope = scope;
+  }
+
+  setCommandRunnerEnabled(enabled: boolean): void {
+    this.commandRunnerEnabled = enabled;
   }
 
   definitionsForMode(mode: AgentMode, allowWrite = false): ChatToolDefinition[] {
@@ -137,6 +148,18 @@ export class WorkspaceTools {
           properties: {
             maxChars: { type: "number", description: "반환할 최대 문자 수입니다. 기본값은 60000입니다." },
           },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "validateWorkspace",
+        description: "감지된 로컬 프로젝트의 build/test를 실행하고 컴파일 오류를 반환합니다. 네트워크를 사용하지 않습니다.",
+        parameters: {
+          type: "object",
+          properties: {},
           additionalProperties: false,
         },
       },
@@ -218,6 +241,8 @@ export class WorkspaceTools {
         return JSON.stringify(await this.searchWorkspace(String(args.query ?? ""), numberOr(args.maxResults, 40)));
       case "getGitDiff":
         return await this.getGitDiff(numberOr(args.maxChars, 60000));
+      case "validateWorkspace":
+        return JSON.stringify(await this.validateWorkspace());
       case "proposePatch":
         return JSON.stringify(args);
       case "applyPatchAfterUserApproval": {
@@ -227,6 +252,97 @@ export class WorkspaceTools {
       default:
         throw new Error(`알 수 없는 도구입니다: '${name}'.`);
     }
+  }
+
+  async validateWorkspace(): Promise<WorkspaceValidationResult> {
+    if (!this.commandRunnerEnabled) {
+      return this.rememberValidation({
+        status: "skipped",
+        summary: "Workspace validation is disabled. Enable companyCodeAI.enableCommandRunner to run local build/test commands.",
+        output: "",
+        commands: [],
+      });
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      return this.rememberValidation({ status: "skipped", summary: "No workspace folder is open.", output: "", commands: [] });
+    }
+
+    const root = folder.uri.fsPath;
+    const projectFiles = await vscode.workspace.findFiles(
+      "**/*.{sln,slnx,csproj,vcxproj,package.json,CMakeLists.txt}",
+      "**/{.git,node_modules,bin,obj,dist,build,.company-code-ai}/**",
+      50,
+    );
+    const rootFiles = projectFiles.filter((uri) => vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() === folder.uri.toString());
+    const relative = rootFiles
+      .map((uri) => path.relative(root, uri.fsPath).replace(/\\/g, "/"))
+      .filter((value) => value && value !== ".");
+    const commands: Array<{ executable: string; args: string[]; label: string }> = [];
+    const solution = relative.find((item) => /\.(sln|slnx)$/i.test(item));
+    const dotnetProject = relative.find((item) => /\.(csproj|fsproj|vbproj)$/i.test(item));
+    const vcxProject = relative.find((item) => /\.vcxproj$/i.test(item));
+    const packageJson = relative.find((item) => item.toLowerCase().endsWith("package.json"));
+    const cmake = relative.find((item) => item.toLowerCase().endsWith("cmakelists.txt"));
+
+    if (solution || dotnetProject) {
+      const target = solution ?? dotnetProject as string;
+      const dotnet = "dotnet";
+      commands.push({ executable: dotnet, args: ["build", target, "--no-restore"], label: `${dotnet} build ${target} --no-restore` });
+      commands.push({ executable: dotnet, args: ["test", target, "--no-build", "--no-restore"], label: `${dotnet} test ${target} --no-build --no-restore` });
+    } else if (vcxProject) {
+      commands.push({ executable: "msbuild", args: [vcxProject, "/t:Build", "/m"], label: `msbuild ${vcxProject} /t:Build /m` });
+    } else if (packageJson) {
+      let hasTestScript = false;
+      try {
+        const packageText = await fs.readFile(path.join(root, packageJson), "utf8");
+        const parsed = JSON.parse(packageText) as { scripts?: Record<string, unknown> };
+        hasTestScript = typeof parsed.scripts?.test === "string";
+      } catch {
+        // The command output below provides the actionable parse error if package.json is invalid.
+        hasTestScript = true;
+      }
+      if (hasTestScript) {
+        const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+        commands.push({ executable: npm, args: ["test"], label: `${npm} test` });
+      }
+    } else if (cmake) {
+      const buildDirectory = path.join(root, "build");
+      try {
+        const stat = await fs.stat(buildDirectory);
+        if (stat.isDirectory()) commands.push({ executable: "cmake", args: ["--build", "build", "--config", "Debug"], label: "cmake --build build --config Debug" });
+      } catch {
+        // No configured build directory; report a skipped validation below.
+      }
+    }
+
+    if (commands.length === 0) {
+      return this.rememberValidation({ status: "skipped", summary: "No supported local build/test entry point was detected.", output: "", commands: [] });
+    }
+    const output: string[] = [];
+    for (const command of commands) {
+      const result = await runLocalCommand(command.executable, command.args, root);
+      output.push(`$ ${command.label}\n${result.output}`.trim());
+      if (result.exitCode !== 0) {
+        return this.rememberValidation({
+          status: "failed",
+          summary: `${command.label} failed with exit code ${result.exitCode}.`,
+          output: output.join("\n\n").slice(-60000),
+          commands: commands.map((item) => item.label),
+        });
+      }
+    }
+    return this.rememberValidation({
+      status: "passed",
+      summary: `Build/test validation passed (${commands.length} command(s)).`,
+      output: output.join("\n\n").slice(-60000),
+      commands: commands.map((item) => item.label),
+    });
+  }
+
+  private rememberValidation(result: WorkspaceValidationResult): WorkspaceValidationResult {
+    this.lastValidation = result;
+    return result;
   }
 
   async listFiles(glob = "**/*", maxResults = 200): Promise<string[]> {
@@ -706,6 +822,32 @@ function parseArgs(rawArgs: string): Record<string, unknown> {
     throw new Error("도구 인자는 JSON 객체여야 합니다.");
   }
   return parsed as Record<string, unknown>;
+}
+
+function runLocalCommand(executable: string, args: string[], cwd: string): Promise<{ exitCode: number; output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(executable, args, { cwd, windowsHide: true });
+    const chunks: string[] = [];
+    let settled = false;
+    const append = (value: Buffer): void => {
+      chunks.push(value.toString("utf8"));
+      if (chunks.join("").length > 60000) chunks.splice(0, Math.max(0, chunks.length - 1));
+    };
+    const finish = (exitCode: number, output: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ exitCode, output });
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.on("error", (error) => finish(-1, error.message));
+    child.on("close", (code) => finish(code ?? -1, chunks.join("").slice(-60000)));
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(-2, `${chunks.join("").slice(-58000)}\n[validation timed out after 180 seconds]`);
+    }, 180000);
+  });
 }
 
 function numberOr(value: unknown, fallback: number): number {

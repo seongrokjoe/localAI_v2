@@ -20,7 +20,7 @@ class Element {
   appendChild(child) { this.children.push(child); return child; }
 }
 
-const ids = ["tabs", "blocks", "status", "compare", "save", "discard"];
+const ids = ["tabs", "blocks", "status", "compare", "save", "saveAll", "validate", "discard"];
 const elements = new Map(ids.map((id) => [id, new Element(id)]));
 const created = [];
 const posted = [];
@@ -59,6 +59,7 @@ onMessage({ data: { type: "state", state: {
 
 elements.get("compare").dispatch("click");
 elements.get("save").dispatch("click");
+elements.get("saveAll").dispatch("click");
 elements.get("discard").dispatch("click");
 const checkbox = created.find((element) => element.tag === "input");
 checkbox.checked = true;
@@ -68,6 +69,7 @@ created.find((element) => element.textContent === "복사").dispatch("click");
 assert.deepEqual(JSON.parse(JSON.stringify(posted)), [
   { type: "compareFile", fileId: "file-1" },
   { type: "saveFile", fileId: "file-1" },
+  { type: "saveAll" },
   { type: "discard" },
   { type: "toggleBlock", blockId: "block-1", checked: true },
   { type: "copyBlock", blockId: "block-1" },

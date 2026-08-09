@@ -78,4 +78,20 @@ assert.equal(replacementForLineChange("replace", "TWO", "two\r\n", 5, crlfSource
 assert.equal(replacementForLineChange("insert_before", "added", "", 5, crlfSource, "\r\n"), "added\r\n");
 assert.equal(replacementForLineChange("insert_after", "added", "", crlfSource.length, crlfSource, "\r\n"), "\r\nadded");
 
+const nestedSource = "void run() {\n    if (ready) {\n        old();\n    }\n}";
+const nestedStart = lineOperationOffsets(nestedSource, "replace", 3, 3);
+assert.deepEqual(nestedStart, { start: 30, end: 45 });
+assert.equal(
+  replacementForLineChange("replace", "newValue();\n    log(newValue);", "        old();\n", nestedStart.start, nestedSource, "\n"),
+  "        newValue();\n            log(newValue);\n",
+);
+assert.equal(
+  replacementForLineChange("insert_before", "if (ok) {\n    work();\n}", "        old();\n", nestedStart.start, nestedSource, "\n"),
+  "        if (ok) {\n            work();\n        }\n",
+);
+assert.equal(
+  replacementForLineChange("insert_after", "next();", "", nestedStart.end, nestedSource, "\n"),
+  "        next();\n",
+);
+
 console.log("Line change protocol tests passed.");

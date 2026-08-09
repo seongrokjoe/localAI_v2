@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { ChatViewProvider, configureServer, setAuthToken } from "./chatView";
-import { secretTokenKey } from "./config";
+import { readSettings, secretTokenKey } from "./config";
 import { ContextManager } from "./context";
 import { CodeAgent } from "./agent";
 import { WorkspaceTools, ensureCacheDirectory } from "./tools";
@@ -29,6 +29,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const tools = new WorkspaceTools(output, async (mode, changes) => {
     await sessionStore.recordChangeSet(mode, changes);
   });
+  tools.setCommandRunnerEnabled(readSettings().enableCommandRunner);
   tools.setActiveScope(sessionStore.activeScope);
   const agent = new CodeAgent(tools, output);
   const changeWorkbench = new ChangeWorkbenchManager(context.extensionUri, context.storageUri ?? context.globalStorageUri, tools, output);
@@ -43,6 +44,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     contextManager,
     modeManager,
     changeWorkbench,
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("companyCodeAI.enableCommandRunner")) {
+        tools.setCommandRunnerEnabled(readSettings().enableCommandRunner);
+      }
+    }),
     vscode.window.registerWebviewViewProvider("companyCodeAI.chatView", chatView),
     vscode.commands.registerCommand("companyCodeAI.openChat", () => chatView.reveal()),
     vscode.commands.registerCommand("companyCodeAI.openChangeWorkbench", () => changeWorkbench.open()),
@@ -81,6 +87,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("companyCodeAI.reviewLastAIChange", () => chatView.reviewLastAIChange()),
     vscode.commands.registerCommand("companyCodeAI.showLastPatchDiagnostics", () => tools.showLastPatchDiagnostics()),
+    vscode.commands.registerCommand("companyCodeAI.validateWorkspace", async () => {
+      tools.setCommandRunnerEnabled(readSettings().enableCommandRunner);
+      const result = await tools.validateWorkspace();
+      output.appendLine(`[Workspace validation] ${result.summary}`);
+      if (result.output) output.appendLine(result.output);
+      output.show(true);
+      if (result.status === "passed") vscode.window.showInformationMessage(result.summary);
+      else if (result.status === "failed") vscode.window.showErrorMessage(result.summary);
+      else vscode.window.showWarningMessage(result.summary);
+      return result;
+    }),
     vscode.commands.registerCommand("companyCodeAI.initProjectSummary", async () => {
       await modeManager.set("plan");
       chatView.postState();

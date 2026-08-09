@@ -604,6 +604,15 @@ export class CodeAgent {
     addSection("projectSummary", await readSummaryForContext(50000), 50000);
     addSection("workspaceFiles", (await this.safeListFiles()).join("\n"), 12000);
     addSection("gitDiff", await this.tools.getGitDiff(120000), 30000);
+    const validation = this.tools.lastValidationResult;
+    if (validation) {
+      addSection("workspaceValidation", [
+        `status: ${validation.status}`,
+        `summary: ${validation.summary}`,
+        validation.commands.length > 0 ? `commands:\n${validation.commands.join("\n")}` : "",
+        validation.output,
+      ].filter(Boolean).join("\n\n"), 30000);
+    }
     addSection("explicitContext", renderContextItems(contextItems), 60000);
     addSection("visibleEditors", renderVisibleEditors(), 30000);
 

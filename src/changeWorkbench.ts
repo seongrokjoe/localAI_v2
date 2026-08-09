@@ -284,6 +284,8 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       else if (message.type === "mapSelection" && message.blockId) await this.mapCurrentSelection(message.blockId);
       else if (message.type === "compareFile" && message.fileId) await this.compareFile(message.fileId);
       else if (message.type === "saveFile" && message.fileId) await this.saveFile(message.fileId);
+      else if (message.type === "saveAll") await this.saveAllFiles();
+      else if (message.type === "validateWorkspace") await this.validateWorkspace();
       else if (message.type === "discard") await this.discard();
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
@@ -447,6 +449,41 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
       this.post({ type: "saveResult", ok: false, text: session.message });
     }
     return outcome;
+  }
+
+  private async saveAllFiles(): Promise<void> {
+    const session = this.requireActive();
+    const changedFiles: WorkbenchFile[] = [];
+    for (const file of session.files) {
+      const document = await vscode.workspace.openTextDocument(file.draftUri);
+      if (document.getText() !== file.baseText) changedFiles.push(file);
+    }
+    if (changedFiles.length === 0) {
+      session.message = "No changed files to save.";
+      this.post({ type: "status", text: session.message });
+      return;
+    }
+
+    const failures: string[] = [];
+    for (const file of changedFiles) {
+      const outcome = await this.saveFile(file.id);
+      if (outcome.status !== "applied") failures.push(`${file.path}: ${outcome.message}`);
+    }
+    session.message = failures.length === 0
+      ? `Saved and verified ${changedFiles.length} changed file(s).`
+      : `Saved ${changedFiles.length - failures.length}/${changedFiles.length} file(s); ${failures.join(" | ")}`;
+    this.post({ type: "saveResult", ok: failures.length === 0, text: session.message });
+    await this.saveActive();
+  }
+
+  private async validateWorkspace(): Promise<void> {
+    const session = this.requireActive();
+    const result = await this.tools.validateWorkspace();
+    session.message = result.summary;
+    this.output.appendLine(`[Workspace validation] ${result.summary}`);
+    if (result.output) this.output.appendLine(result.output);
+    this.post({ type: "validationResult", ok: result.status === "passed", text: result.summary, output: result.output });
+    await this.saveActive();
   }
 
   private replacementForBlock(file: WorkbenchFile, block: WorkbenchBlock): string {
@@ -768,6 +805,8 @@ export class ChangeWorkbenchManager implements vscode.Disposable {
     <div class="actions">
       <button id="compare">변경 비교</button>
       <button class="primary" id="save">이 파일 저장</button>
+      <button id="saveAll">Save all changed files</button>
+      <button id="validate">Validate build/test</button>
       <button id="discard">작업대 버리기</button>
     </div>
   </div>

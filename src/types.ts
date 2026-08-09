@@ -191,6 +191,13 @@ export interface PatchApplyOutcome {
   targets: PatchTargetResult[];
 }
 
+export interface WorkspaceValidationResult {
+  status: "passed" | "failed" | "skipped";
+  summary: string;
+  output: string;
+  commands: string[];
+}
+
 export interface AssistantPatchApplyResult {
   response: string;
   outcome: PatchApplyOutcome;

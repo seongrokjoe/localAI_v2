@@ -32,9 +32,6 @@ export function validateRuntimeSettings(settings: ExtensionSettings): void {
   if (!settings.model.trim()) {
     throw new Error("모델이 설정되지 않았습니다.");
   }
-  if (settings.enableCommandRunner) {
-    throw new Error("명령 실행기는 향후 검토용 기능이며 v1에서는 비활성화되어 있습니다.");
-  }
 }
 
 export async function updateSetting<T>(key: string, value: T): Promise<void> {

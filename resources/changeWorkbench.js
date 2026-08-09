@@ -4,11 +4,15 @@ const blocks = document.getElementById("blocks");
 const status = document.getElementById("status");
 const compare = document.getElementById("compare");
 const save = document.getElementById("save");
+const saveAll = document.getElementById("saveAll");
+const validate = document.getElementById("validate");
 const discard = document.getElementById("discard");
 let state;
 
 compare.addEventListener("click", () => postForActiveFile("compareFile"));
 save.addEventListener("click", () => postForActiveFile("saveFile"));
+saveAll.addEventListener("click", () => vscode.postMessage({ type: "saveAll" }));
+validate.addEventListener("click", () => vscode.postMessage({ type: "validateWorkspace" }));
 discard.addEventListener("click", () => vscode.postMessage({ type: "discard" }));
 
 window.addEventListener("message", (event) => {
@@ -17,7 +21,7 @@ window.addEventListener("message", (event) => {
     state = message.state;
     render();
   }
-  if (message.type === "status" || message.type === "operation" || message.type === "saveResult") {
+  if (message.type === "status" || message.type === "operation" || message.type === "saveResult" || message.type === "validationResult") {
     setStatus(message.text, message.ok === false);
   }
   if (message.type === "error") setStatus(message.text, true);
@@ -30,13 +34,19 @@ function render() {
     setStatus("진행 중인 작업대 없음");
     compare.disabled = true;
     save.disabled = true;
+    saveAll.disabled = true;
+    validate.disabled = true;
     return;
   }
   setStatus(state.message || "준비");
   const activeFile = state.files.find((file) => file.id === state.activeFileId);
+  const changedFiles = state.files.filter((file) => file.changed);
   for (const file of state.files) {
     const button = document.createElement("button");
     button.textContent = (file.changed ? "● " : "") + file.path;
+    const fileBlocks = state.blocks.filter((block) => block.targetFileId === file.id);
+    const selected = fileBlocks.filter((block) => block.selected).length;
+    button.textContent = `${file.changed ? "* " : ""}${file.path} (${selected}/${fileBlocks.length})`;
     button.classList.toggle("active", file.id === state.activeFileId);
     button.title = file.draftPath;
     button.addEventListener("click", () => vscode.postMessage({ type: "selectFile", fileId: file.id }));
@@ -52,6 +62,8 @@ function render() {
   }
   compare.disabled = !activeFile;
   save.disabled = !activeFile || !activeFile.changed;
+  saveAll.disabled = changedFiles.length === 0;
+  validate.disabled = false;
   renderBlocks(activeFile ? state.blocks.filter((block) => block.targetFileId === activeFile.id) : unmapped);
 }
 
