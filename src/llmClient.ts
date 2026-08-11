@@ -1,9 +1,10 @@
-import { RuntimeConfig, ChatMessage, ChatToolCall, ChatToolDefinition, CompletionResult } from "./types";
+import { RuntimeConfig, ChatMessage, ChatToolCall, ChatToolDefinition, CompletionResult, NativeToolChoice } from "./types";
 import { validateServerUrl } from "./security";
 
 interface CompletionOptions {
   messages: ChatMessage[];
   tools?: ChatToolDefinition[];
+  toolChoice?: NativeToolChoice;
   onDelta: (text: string) => void;
   signal?: AbortSignal;
 }
@@ -13,16 +14,7 @@ export class LlmClient {
 
   async complete(options: CompletionOptions): Promise<CompletionResult> {
     const url = buildChatCompletionsUrl(this.config.serverUrl, this.config.allowedServerHosts);
-    const body: Record<string, unknown> = {
-      model: this.config.model,
-      messages: options.messages,
-      stream: true,
-      max_tokens: this.config.maxOutputTokens,
-    };
-    if (options.tools && options.tools.length > 0) {
-      body.tools = options.tools;
-      body.tool_choice = "auto";
-    }
+    const body = buildChatCompletionBody(this.config, options);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
@@ -62,6 +54,23 @@ export class LlmClient {
     }
     return headers;
   }
+}
+
+export function buildChatCompletionBody(
+  config: Pick<RuntimeConfig, "model" | "maxOutputTokens">,
+  options: Pick<CompletionOptions, "messages" | "tools" | "toolChoice">,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages: options.messages,
+    stream: true,
+    max_tokens: config.maxOutputTokens,
+  };
+  if (options.tools && options.tools.length > 0) {
+    body.tools = options.tools;
+    body.tool_choice = options.toolChoice ?? "auto";
+  }
+  return body;
 }
 
 function buildChatCompletionsUrl(rawUrl: string, allowedHosts: string[]): URL {

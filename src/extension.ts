@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { ChatViewProvider, configureServer, setAuthToken } from "./chatView";
+import { ChatViewProvider, configureServer, configureServerProfiles, selectServerProfile, setAuthToken } from "./chatView";
 import { readSettings, secretTokenKey } from "./config";
 import { ContextManager } from "./context";
 import { CodeAgent } from "./agent";
@@ -47,6 +47,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("companyCodeAI.enableCommandRunner")) {
         tools.setCommandRunnerEnabled(readSettings().enableCommandRunner);
+      }
+      if (
+        event.affectsConfiguration("companyCodeAI.activeServerProfile") ||
+        event.affectsConfiguration("companyCodeAI.serverProfiles") ||
+        event.affectsConfiguration("companyCodeAI.serverUrl") ||
+        event.affectsConfiguration("companyCodeAI.model") ||
+        event.affectsConfiguration("companyCodeAI.toolCallMode")
+      ) {
+        chatView.postState();
       }
     }),
     vscode.window.registerWebviewViewProvider("companyCodeAI.chatView", chatView),
@@ -110,7 +119,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("companyCodeAI.openProjectSummary", () => projectInitializer.openProjectSummary()),
     vscode.commands.registerCommand("companyCodeAI.clearInitCache", () => projectInitializer.clearInitCache()),
-    vscode.commands.registerCommand("companyCodeAI.configureServer", () => configureServer()),
+    vscode.commands.registerCommand("companyCodeAI.configureServer", async () => {
+      await configureServer();
+      chatView.postState();
+    }),
+    vscode.commands.registerCommand("companyCodeAI.selectServerProfile", async () => {
+      await selectServerProfile();
+      chatView.postState();
+    }),
+    vscode.commands.registerCommand("companyCodeAI.configureServerProfiles", async () => {
+      await configureServerProfiles();
+      chatView.postState();
+    }),
     vscode.commands.registerCommand("companyCodeAI.setAuthToken", () => setAuthToken(context.secrets)),
     vscode.commands.registerCommand("companyCodeAI.clearAuthToken", async () => {
       await context.secrets.delete(secretTokenKey);

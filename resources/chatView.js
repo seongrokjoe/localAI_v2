@@ -5,6 +5,7 @@ const context = document.getElementById("context");
 const status = document.getElementById("status");
 const planMode = document.getElementById("planMode");
 const implementMode = document.getElementById("implementMode");
+const serverButton = document.getElementById("configure");
 let currentAssistant;
 let assistantBuffer = "";
 let timerId;
@@ -16,7 +17,7 @@ let activeChangeActions;
 
 document.getElementById("send").addEventListener("click", send);
 document.getElementById("stop").addEventListener("click", () => vscode.postMessage({ type: "stop" }));
-document.getElementById("configure").addEventListener("click", () => vscode.postMessage({ type: "configure" }));
+serverButton.addEventListener("click", () => vscode.postMessage({ type: "configure" }));
 document.getElementById("token").addEventListener("click", () => vscode.postMessage({ type: "setToken" }));
 document.getElementById("addFile").addEventListener("click", () => vscode.postMessage({ type: "addCurrentFile" }));
 document.getElementById("initSummary").addEventListener("click", () => vscode.postMessage({ type: "initSummary" }));
@@ -156,6 +157,10 @@ function formatElapsed(totalSeconds) {
 function renderState(state) {
   planMode.classList.toggle("active", state.mode === "plan");
   implementMode.classList.toggle("active", state.mode === "implement");
+  serverButton.textContent = state.activeServerLabel || "서버";
+  serverButton.title = [state.activeServerModel, state.activeToolCallMode ? "tools: " + state.activeToolCallMode : ""]
+    .filter(Boolean)
+    .join(" · ");
   const scope = state.activeScope ? " - " + state.activeScope : "";
   if (timerId) return;
   status.textContent = (state.mode === "implement" ? "구현" : "계획") + scope;

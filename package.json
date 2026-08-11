@@ -2,7 +2,7 @@
   "name": "company-code-ai",
   "displayName": "Company Code AI",
   "description": "사내 Chat Completions 호환 LLM 서버에 연결하는 VS Code 코드베이스 도우미입니다.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "company",
   "license": "UNLICENSED",
   "private": true,
@@ -34,6 +34,8 @@
     "onCommand:companyCodeAI.openProjectSummary",
     "onCommand:companyCodeAI.clearInitCache",
     "onCommand:companyCodeAI.configureServer",
+    "onCommand:companyCodeAI.selectServerProfile",
+    "onCommand:companyCodeAI.configureServerProfiles",
     "onCommand:companyCodeAI.setAuthToken",
     "onCommand:companyCodeAI.clearAuthToken",
     "onCommand:companyCodeAI.addSelectionToChat",
@@ -126,6 +128,14 @@
         "title": "Company Code AI: 서버 설정"
       },
       {
+        "command": "companyCodeAI.selectServerProfile",
+        "title": "Company Code AI: LLM 서버 선택"
+      },
+      {
+        "command": "companyCodeAI.configureServerProfiles",
+        "title": "Company Code AI: LLM 서버 프로필 설정"
+      },
+      {
         "command": "companyCodeAI.setAuthToken",
         "title": "Company Code AI: 인증 토큰 설정"
       },
@@ -145,29 +155,120 @@
     "configuration": {
       "title": "Company Code AI",
       "properties": {
+        "companyCodeAI.activeServerProfile": {
+          "type": "string",
+          "default": "existing",
+          "enum": [
+            "existing",
+            "new"
+          ],
+          "enumDescriptions": [
+            "기존 서버 프로필을 사용합니다.",
+            "변경 서버 프로필을 사용합니다."
+          ],
+          "markdownDescription": "현재 요청에 사용할 LLM 서버 프로필입니다."
+        },
+        "companyCodeAI.serverProfiles": {
+          "type": "object",
+          "default": {
+            "existing": {
+              "serverUrl": "",
+              "model": "",
+              "toolCallMode": "auto",
+              "maxContextTokens": 200000,
+              "maxOutputTokens": 60000,
+              "requestTimeoutMs": 120000
+            },
+            "new": {
+              "serverUrl": "",
+              "model": "",
+              "toolCallMode": "required",
+              "maxContextTokens": 200000,
+              "maxOutputTokens": 60000,
+              "requestTimeoutMs": 120000
+            }
+          },
+          "patternProperties": {
+            "^(existing|new)$": {
+              "type": "object",
+              "properties": {
+                "serverUrl": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "toolCallMode": {
+                  "type": "string",
+                  "enum": [
+                    "auto",
+                    "native",
+                    "required",
+                    "json",
+                    "disabled"
+                  ]
+                },
+                "maxContextTokens": {
+                  "type": "number",
+                  "minimum": 8000,
+                  "maximum": 200000
+                },
+                "maxOutputTokens": {
+                  "type": "number",
+                  "minimum": 1024,
+                  "maximum": 60000
+                },
+                "requestTimeoutMs": {
+                  "type": "number",
+                  "minimum": 10000,
+                  "maximum": 600000
+                }
+              },
+              "required": [
+                "serverUrl",
+                "model",
+                "toolCallMode",
+                "maxContextTokens",
+                "maxOutputTokens",
+                "requestTimeoutMs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "existing",
+            "new"
+          ],
+          "additionalProperties": false,
+          "markdownDescription": "기존 서버와 변경 서버의 연결 및 요청 설정입니다."
+        },
         "companyCodeAI.serverUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "사내 LLM 서버 기본 URL입니다. `https://llm-gateway.internal/v1` 또는 전체 `/chat/completions` 엔드포인트 형식을 사용할 수 있습니다."
+          "markdownDescription": "사내 LLM 서버 기본 URL입니다. `https://llm-gateway.internal/v1` 또는 전체 `/chat/completions` 엔드포인트 형식을 사용할 수 있습니다.",
+          "deprecationMessage": "서버 프로필을 구성한 뒤 companyCodeAI.serverProfiles를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.model": {
           "type": "string",
           "default": "",
-          "markdownDescription": "사내 서버가 받는 모델 식별자입니다."
+          "markdownDescription": "사내 서버가 받는 모델 식별자입니다.",
+          "deprecationMessage": "서버 프로필을 구성한 뒤 companyCodeAI.serverProfiles를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.maxContextTokens": {
           "type": "number",
           "default": 200000,
           "minimum": 8000,
           "maximum": 200000,
-          "markdownDescription": "서버로 보낼 입력 컨텍스트 토큰 목표 상한입니다. 확장은 200k 입력 하드캡을 적용합니다."
+          "markdownDescription": "서버로 보낼 입력 컨텍스트 토큰 목표 상한입니다. 확장은 200k 입력 하드캡을 적용합니다.",
+          "deprecationMessage": "서버 프로필을 구성한 뒤 프로필별 maxContextTokens를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.maxOutputTokens": {
           "type": "number",
           "default": 60000,
           "minimum": 1024,
           "maximum": 60000,
-          "markdownDescription": "사내 Chat Completions 호환 서버에 요청할 최대 출력 토큰 수입니다."
+          "markdownDescription": "사내 Chat Completions 호환 서버에 요청할 최대 출력 토큰 수입니다.",
+          "deprecationMessage": "서버 프로필을 구성한 뒤 프로필별 maxOutputTokens를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.allowedServerHosts": {
           "type": "array",
@@ -193,17 +294,20 @@
           "enum": [
             "auto",
             "native",
+            "required",
             "json",
             "disabled"
           ],
-          "markdownDescription": "에이전트가 안전한 워크스페이스 도구를 모델에 노출하는 방식입니다."
+          "markdownDescription": "에이전트가 안전한 워크스페이스 도구를 모델에 노출하는 방식입니다.",
+          "deprecationMessage": "서버 프로필을 구성한 뒤 프로필별 toolCallMode를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.requestTimeoutMs": {
           "type": "number",
           "default": 120000,
           "minimum": 10000,
           "maximum": 600000,
-          "markdownDescription": "모델 요청 1회에 대한 timeout입니다."
+          "markdownDescription": "모델 요청 1회에 대한 timeout입니다.",
+          "deprecationMessage": "서버 프로필을 구성한 뒤 프로필별 requestTimeoutMs를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.enableCommandRunner": {
           "type": "boolean",
@@ -251,7 +355,7 @@
     "test:webview": "node scripts/test-webview.mjs",
     "test:workbench": "npm run compile && node scripts/test-change-blocks.mjs && node scripts/test-change-workbench-webview.mjs",
     "test:validation": "npm run compile && node scripts/test-project-validation.mjs",
-    "test": "npm run compile && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-context-transmission.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
+    "test": "npm run compile && node scripts/test-llm-config.mjs && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-context-transmission.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",

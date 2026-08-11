@@ -139,6 +139,17 @@ click("send");
 
 const onMessage = windowListeners.get("message");
 assert.ok(onMessage, "window message listener must be registered");
+onMessage({
+  data: {
+    type: "state",
+    mode: "plan",
+    activeServerLabel: "변경 서버",
+    activeServerModel: "new-model",
+    activeToolCallMode: "required",
+  },
+});
+assert.equal(elements.get("configure").textContent, "변경 서버");
+assert.equal(elements.get("configure").title, "new-model · tools: required");
 onMessage({ data: { type: "operation", text: "[validation] build running: app/app.vcxproj" } });
 assert.equal(
   elements.get("messages").children.some((element) => element.className === "message operation" && element.textContent.includes("build running")),

@@ -29,6 +29,7 @@ import { extractReplacementContent } from "./proposalText";
 import { parseLineChangeResponse, renderNumberedFile } from "./lineChangeProtocol";
 import { validateLineMappedChanges, ValidationRunResult } from "./projectValidation";
 import { discoverProjectGraph } from "./projectGraph";
+import { extractFinalResponse, finalResponseTool, finalResponseToolName, requiredToolPrompt } from "./requiredToolProtocol";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -122,9 +123,15 @@ export class CodeAgent {
     };
 
     const client = new LlmClient(config);
-    if (config.toolCallMode === "auto" || config.toolCallMode === "native") {
+    if (config.toolCallMode === "auto" || config.toolCallMode === "native" || config.toolCallMode === "required") {
       try {
-        const result = await client.complete({ messages, tools: [tool], signal, onDelta: () => undefined });
+        const result = await client.complete({
+          messages,
+          tools: [tool],
+          toolChoice: config.toolCallMode === "required" ? "required" : "auto",
+          signal,
+          onDelta: () => undefined,
+        });
         for (const call of result.toolCalls) {
           if (call.function.name !== "submitRegionReplacement") {
             continue;
@@ -184,14 +191,24 @@ export class CodeAgent {
     const client = new LlmClient(config);
     let accumulated = "";
     const toolMode = config.toolCallMode;
-    const useNativeTools = toolMode === "native" || toolMode === "auto";
+    const useNativeTools = toolMode === "native" || toolMode === "auto" || toolMode === "required";
     const useJsonTools = toolMode === "json" || toolMode === "auto";
+    const requiresToolCall = toolMode === "required";
+    if (requiresToolCall) {
+      messages[0] = { ...messages[0], content: `${messages[0].content}\n\n${requiredToolPrompt}` };
+    }
 
     for (let step = 0; step < 4; step++) {
       const nativeDefinitions = this.tools.definitionsForMode(options.mode, false);
+      const requestTools = useNativeTools
+        ? requiresToolCall
+          ? [...nativeDefinitions, finalResponseTool]
+          : nativeDefinitions
+        : undefined;
       const result = await client.complete({
         messages,
-        tools: useNativeTools ? nativeDefinitions : undefined,
+        tools: requestTools,
+        toolChoice: requiresToolCall ? "required" : useNativeTools ? "auto" : undefined,
         signal,
         onDelta: (text) => {
           accumulated += text;
@@ -201,7 +218,23 @@ export class CodeAgent {
 
       const toolCalls = result.toolCalls.length > 0 ? result.toolCalls : useJsonTools ? parseJsonEnvelope(result.content) : [];
       if (toolCalls.length === 0) {
+        if (requiresToolCall) {
+          throw new Error(`${config.activeServerLabel}가 required Tool Calling 응답에 유효한 tool_calls를 반환하지 않았습니다.`);
+        }
         return finishPlanRun(accumulated);
+      }
+
+      if (requiresToolCall) {
+        const workspaceCalls = toolCalls.filter((call) => call.function.name !== finalResponseToolName);
+        const finalCalls = toolCalls.filter((call) => call.function.name === finalResponseToolName);
+        if (workspaceCalls.length === 0 && finalCalls.length > 0) {
+          const finalContent = extractFinalResponse(finalCalls[0]);
+          if (finalContent) {
+            accumulated += finalContent;
+            onDelta(finalContent);
+            return finishPlanRun(accumulated);
+          }
+        }
       }
 
       messages.push({
@@ -211,7 +244,11 @@ export class CodeAgent {
       });
 
       for (const toolCall of toolCalls) {
-        const toolResult = await this.executeToolCall(toolCall, options.mode);
+        const toolResult = toolCall.function.name === finalResponseToolName
+          ? JSON.stringify({
+              error: "최종 답변 호출은 다른 도구 호출과 함께 사용할 수 없습니다. 도구 결과를 확인한 뒤 다시 제출하세요.",
+            })
+          : await this.executeToolCall(toolCall, options.mode);
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id || toolCall.function.name,
@@ -220,6 +257,11 @@ export class CodeAgent {
       }
     }
 
+    if (requiresToolCall) {
+      const finalContent = await completeRequiredFinalResponse(client, messages, signal, config.activeServerLabel);
+      accumulated += finalContent;
+      onDelta(finalContent);
+    }
     return finishPlanRun(accumulated);
   }
 
@@ -917,6 +959,27 @@ function tryParseJsonBlock(content: string): any {
   } catch {
     return undefined;
   }
+}
+
+async function completeRequiredFinalResponse(
+  client: LlmClient,
+  messages: ChatMessage[],
+  signal: AbortSignal | undefined,
+  serverLabel: string,
+): Promise<string> {
+  const result = await client.complete({
+    messages,
+    tools: [finalResponseTool],
+    toolChoice: "required",
+    signal,
+    onDelta: () => undefined,
+  });
+  const finalCall = result.toolCalls.find((call) => call.function.name === finalResponseToolName);
+  const content = finalCall ? extractFinalResponse(finalCall) : undefined;
+  if (!content) {
+    throw new Error(`${serverLabel}가 required Tool Calling의 최종 답변을 반환하지 않았습니다.`);
+  }
+  return content;
 }
 
 async function completeHiddenJson(messages: ChatMessage[], config: RuntimeConfig, signal?: AbortSignal): Promise<string> {

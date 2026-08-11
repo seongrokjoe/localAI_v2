@@ -1,14 +1,38 @@
 import * as vscode from "vscode";
-import { ExtensionSettings, RuntimeConfig, ToolCallMode } from "./types";
+import {
+  ExtensionSettings,
+  LlmServerProfile,
+  LlmServerProfiles,
+  RuntimeConfig,
+  ServerProfileId,
+} from "./types";
 import { validateServerUrl } from "./security";
+import {
+  legacyProfile,
+  normalizeServerProfiles,
+  parseServerProfileId,
+  parseToolCallMode,
+  serverProfileLabels,
+} from "./serverProfiles";
+
+export { legacyProfile, profileIsComplete, serverProfileLabels } from "./serverProfiles";
 
 export const secretTokenKey = "companyCodeAI.authToken";
+
+export interface ServerProfileState {
+  activeId: ServerProfileId;
+  profiles: LlmServerProfiles;
+  usesLegacyFallback: boolean;
+}
 
 export function readSettings(): ExtensionSettings {
   const config = vscode.workspace.getConfiguration("companyCodeAI");
   const toolCallMode = config.get<string>("toolCallMode", "auto");
+  const activeServerProfile = parseServerProfileId(config.get<string>("activeServerProfile", "existing"));
 
   return {
+    activeServerProfile,
+    serverProfiles: normalizeServerProfiles(config.get<unknown>("serverProfiles")),
     serverUrl: config.get<string>("serverUrl", ""),
     model: config.get<string>("model", ""),
     maxContextTokens: clamp(config.get<number>("maxContextTokens", 200000), 8000, 200000),
@@ -22,27 +46,54 @@ export function readSettings(): ExtensionSettings {
 
 export async function readRuntimeConfig(secrets: vscode.SecretStorage): Promise<RuntimeConfig> {
   const settings = readSettings();
-  validateRuntimeSettings(settings);
+  const state = readServerProfileState(settings);
+  const profile = state.usesLegacyFallback ? legacyProfile(settings) : state.profiles[state.activeId];
+  validateRuntimeProfile(profile, settings.allowedServerHosts, serverProfileLabels[state.activeId]);
   const authToken = await secrets.get(secretTokenKey);
-  return { ...settings, authToken };
+  return {
+    ...profile,
+    activeServerProfile: state.activeId,
+    activeServerLabel: state.usesLegacyFallback ? "현재 단일 설정" : serverProfileLabels[state.activeId],
+    allowedServerHosts: settings.allowedServerHosts,
+    enableCommandRunner: settings.enableCommandRunner,
+    authToken,
+  };
 }
 
 export function validateRuntimeSettings(settings: ExtensionSettings): void {
-  validateServerUrl(settings.serverUrl, settings.allowedServerHosts);
-  if (!settings.model.trim()) {
-    throw new Error("모델이 설정되지 않았습니다.");
+  const state = readServerProfileState(settings);
+  const profile = state.usesLegacyFallback ? legacyProfile(settings) : state.profiles[state.activeId];
+  validateRuntimeProfile(profile, settings.allowedServerHosts, serverProfileLabels[state.activeId]);
+}
+
+export function validateRuntimeProfile(profile: LlmServerProfile, allowedHosts: string[], label: string): void {
+  try {
+    validateServerUrl(profile.serverUrl, allowedHosts);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}: ${message}`);
   }
+  if (!profile.model.trim()) {
+    throw new Error(`${label}: 모델이 설정되지 않았습니다.`);
+  }
+}
+
+export function readServerProfileState(settings = readSettings()): ServerProfileState {
+  const configured = hasConfiguredProfiles();
+  return {
+    activeId: settings.activeServerProfile,
+    profiles: settings.serverProfiles,
+    usesLegacyFallback: !configured,
+  };
 }
 
 export async function updateSetting<T>(key: string, value: T): Promise<void> {
   await vscode.workspace.getConfiguration("companyCodeAI").update(key, value, vscode.ConfigurationTarget.Global);
 }
 
-function parseToolCallMode(value: string): ToolCallMode {
-  if (value === "native" || value === "json" || value === "disabled") {
-    return value;
-  }
-  return "auto";
+function hasConfiguredProfiles(): boolean {
+  const inspected = vscode.workspace.getConfiguration("companyCodeAI").inspect<unknown>("serverProfiles");
+  return inspected?.globalValue !== undefined || inspected?.workspaceValue !== undefined || inspected?.workspaceFolderValue !== undefined;
 }
 
 function clamp(value: number, min: number, max: number): number {

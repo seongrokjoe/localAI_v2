@@ -1,9 +1,24 @@
 import type { ValidationRunResult } from "./projectValidation";
-export type ToolCallMode = "auto" | "native" | "json" | "disabled";
+export type ToolCallMode = "auto" | "native" | "required" | "json" | "disabled";
+export type NativeToolChoice = "auto" | "required";
+export type ServerProfileId = "existing" | "new";
 export type AgentMode = "plan" | "implement";
 export type ChatRole = "user" | "assistant";
 
+export interface LlmServerProfile {
+  serverUrl: string;
+  model: string;
+  toolCallMode: ToolCallMode;
+  maxContextTokens: number;
+  maxOutputTokens: number;
+  requestTimeoutMs: number;
+}
+
+export type LlmServerProfiles = Record<ServerProfileId, LlmServerProfile>;
+
 export interface ExtensionSettings {
+  activeServerProfile: ServerProfileId;
+  serverProfiles: LlmServerProfiles;
   serverUrl: string;
   model: string;
   maxContextTokens: number;
@@ -14,7 +29,11 @@ export interface ExtensionSettings {
   enableCommandRunner: boolean;
 }
 
-export interface RuntimeConfig extends ExtensionSettings {
+export interface RuntimeConfig extends LlmServerProfile {
+  activeServerProfile: ServerProfileId;
+  activeServerLabel: string;
+  allowedServerHosts: string[];
+  enableCommandRunner: boolean;
   authToken?: string;
 }
 

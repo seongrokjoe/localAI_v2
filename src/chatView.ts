@@ -1,10 +1,29 @@
 import * as vscode from "vscode";
 import { CodeAgent } from "./agent";
-import { readRuntimeConfig, secretTokenKey, updateSetting } from "./config";
+import {
+  legacyProfile,
+  profileIsComplete,
+  readRuntimeConfig,
+  readServerProfileState,
+  readSettings,
+  secretTokenKey,
+  serverProfileLabels,
+  updateSetting,
+  validateRuntimeProfile,
+} from "./config";
 import { ContextManager } from "./context";
 import { ModeManager } from "./modeManager";
 import { SessionStore } from "./sessionStore";
-import { AgentMode, ChangeWorkbenchState, LineMappedChange, SourceSnapshot } from "./types";
+import {
+  AgentMode,
+  ChangeWorkbenchState,
+  LineMappedChange,
+  LlmServerProfile,
+  LlmServerProfiles,
+  ServerProfileId,
+  SourceSnapshot,
+  ToolCallMode,
+} from "./types";
 import { ChangeWorkbenchManager } from "./changeWorkbench";
 
 interface WebviewMessage {
@@ -64,10 +83,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   postState(): void {
+    const settings = readSettings();
+    const profileState = readServerProfileState(settings);
+    const activeProfile = profileState.usesLegacyFallback
+      ? legacyProfile(settings)
+      : profileState.profiles[profileState.activeId];
     this.view?.webview.postMessage({
       type: "state",
       mode: this.modeManager.current,
       activeScope: this.sessionStore.activeScope,
+      activeServerLabel: profileState.usesLegacyFallback ? "현재 설정" : serverProfileLabels[profileState.activeId],
+      activeServerModel: activeProfile.model,
+      activeToolCallMode: activeProfile.toolCallMode,
     });
   }
 
@@ -94,7 +121,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         break;
       case "configure":
-        await vscode.commands.executeCommand("companyCodeAI.configureServer");
+        await vscode.commands.executeCommand("companyCodeAI.selectServerProfile");
         break;
       case "setToken":
         await vscode.commands.executeCommand("companyCodeAI.setAuthToken");
@@ -475,7 +502,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div class="top-controls">
     <div class="toolbar">
-      <button id="configure">서버</button>
+      <button id="configure" title="LLM 서버 선택">서버</button>
       <button id="token">토큰</button>
       <button id="addFile">파일</button>
       <button id="initSummary" title="SUMMARY.md 생성 또는 갱신">초기화</button>
@@ -503,24 +530,219 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 }
 
 export async function configureServer(): Promise<void> {
-  const current = vscode.workspace.getConfiguration("companyCodeAI");
-  const serverUrl = await vscode.window.showInputBox({
-    title: "사내 LLM 서버 URL",
-    value: current.get<string>("serverUrl", ""),
-    ignoreFocusOut: true,
-  });
-  if (serverUrl !== undefined) {
-    await updateSetting("serverUrl", serverUrl.trim());
+  await configureServerProfiles();
+}
+
+type ServerProfileQuickPickItem = vscode.QuickPickItem & {
+  action: "select" | "edit";
+  profileId: ServerProfileId;
+};
+
+export async function selectServerProfile(): Promise<boolean> {
+  if (!(await migrateLegacySettings())) {
+    return false;
   }
 
-  const model = await vscode.window.showInputBox({
-    title: "사내 모델 이름",
-    value: current.get<string>("model", ""),
+  const settings = readSettings();
+  const state = readServerProfileState(settings);
+  const items: ServerProfileQuickPickItem[] = (["existing", "new"] as const).flatMap((profileId) => {
+    const profile = state.profiles[profileId];
+    const label = serverProfileLabels[profileId];
+    const detail = profileIsComplete(profile)
+      ? `${profile.serverUrl} · ${profile.model} · tools: ${profile.toolCallMode}`
+      : "설정 필요";
+    return [
+      {
+        label: `${state.activeId === profileId ? "$(check)" : "$(server)"} ${label}`,
+        description: state.activeId === profileId ? "현재 사용 중" : undefined,
+        detail,
+        action: "select" as const,
+        profileId,
+      },
+      {
+        label: `$(gear) ${label} 편집`,
+        detail,
+        action: "edit" as const,
+        profileId,
+      },
+    ];
+  });
+  const selected = await vscode.window.showQuickPick(items, {
+    title: "Company Code AI LLM 서버 선택",
+    placeHolder: "사용할 서버를 선택하거나 프로필을 편집하세요.",
     ignoreFocusOut: true,
   });
-  if (model !== undefined) {
-    await updateSetting("model", model.trim());
+  if (!selected) {
+    return false;
   }
+  if (selected.action === "edit") {
+    return await editServerProfile(selected.profileId, state.profiles, state.usesLegacyFallback);
+  }
+  if (!profileIsComplete(state.profiles[selected.profileId])) {
+    return await editServerProfile(selected.profileId, state.profiles, true);
+  }
+  try {
+    validateRuntimeProfile(state.profiles[selected.profileId], settings.allowedServerHosts, serverProfileLabels[selected.profileId]);
+  } catch (error) {
+    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    return false;
+  }
+  await updateSetting("activeServerProfile", selected.profileId);
+  vscode.window.showInformationMessage(`${serverProfileLabels[selected.profileId]} 프로필을 사용합니다.`);
+  return true;
+}
+
+export async function configureServerProfiles(): Promise<boolean> {
+  if (!(await migrateLegacySettings())) {
+    const settings = readSettings();
+    if (profileIsComplete(legacyProfile(settings))) {
+      return false;
+    }
+  }
+  const state = readServerProfileState();
+  const selected = await vscode.window.showQuickPick(
+    (["existing", "new"] as const).map((profileId) => ({
+      label: serverProfileLabels[profileId],
+      description: state.activeId === profileId ? "현재 사용 중" : undefined,
+      detail: profileSummary(state.profiles[profileId]),
+      profileId,
+    })),
+    {
+      title: "편집할 LLM 서버 프로필",
+      ignoreFocusOut: true,
+    },
+  );
+  if (!selected) {
+    return false;
+  }
+  return await editServerProfile(selected.profileId, state.profiles, state.usesLegacyFallback);
+}
+
+async function migrateLegacySettings(): Promise<boolean> {
+  const settings = readSettings();
+  const state = readServerProfileState(settings);
+  if (!state.usesLegacyFallback) {
+    return true;
+  }
+  const current = legacyProfile(settings);
+  if (!profileIsComplete(current)) {
+    return true;
+  }
+  const selected = await vscode.window.showQuickPick(
+    (["existing", "new"] as const).map((profileId) => ({
+      label: serverProfileLabels[profileId],
+      description: `현재 단일 설정(${current.model})을 이 프로필로 가져옵니다.`,
+      profileId,
+    })),
+    {
+      title: "기존 LLM 설정 가져오기",
+      placeHolder: "현재 settings.json의 서버가 어느 프로필인지 선택하세요.",
+      ignoreFocusOut: true,
+    },
+  );
+  if (!selected) {
+    return false;
+  }
+  const profiles: LlmServerProfiles = {
+    ...state.profiles,
+    [selected.profileId]: current,
+  };
+  await updateSetting("activeServerProfile", selected.profileId);
+  await updateSetting("serverProfiles", profiles);
+  vscode.window.showInformationMessage(`현재 단일 설정을 ${serverProfileLabels[selected.profileId]}로 가져왔습니다.`);
+  return true;
+}
+
+async function editServerProfile(
+  profileId: ServerProfileId,
+  profiles: LlmServerProfiles,
+  activateAfterSave: boolean,
+): Promise<boolean> {
+  const current = profiles[profileId];
+  const label = serverProfileLabels[profileId];
+  const serverUrl = await vscode.window.showInputBox({
+    title: `${label}: 사내 LLM 서버 URL`,
+    value: current.serverUrl,
+    prompt: "기본 /v1 URL 또는 전체 /chat/completions URL을 입력하세요.",
+    ignoreFocusOut: true,
+    validateInput: (value) => value.trim() ? undefined : "서버 URL을 입력하세요.",
+  });
+  if (serverUrl === undefined) return false;
+
+  const model = await vscode.window.showInputBox({
+    title: `${label}: 모델 이름`,
+    value: current.model,
+    ignoreFocusOut: true,
+    validateInput: (value) => value.trim() ? undefined : "모델 이름을 입력하세요.",
+  });
+  if (model === undefined) return false;
+
+  const toolMode = await pickToolCallMode(label, current.toolCallMode);
+  if (!toolMode) return false;
+  const maxContextTokens = await promptInteger(`${label}: 최대 입력 컨텍스트 토큰`, current.maxContextTokens, 8000, 200000);
+  if (maxContextTokens === undefined) return false;
+  const maxOutputTokens = await promptInteger(`${label}: 최대 출력 토큰`, current.maxOutputTokens, 1024, 60000);
+  if (maxOutputTokens === undefined) return false;
+  const requestTimeoutMs = await promptInteger(`${label}: 요청 타임아웃(ms)`, current.requestTimeoutMs, 10000, 600000);
+  if (requestTimeoutMs === undefined) return false;
+
+  const profile: LlmServerProfile = {
+    serverUrl: serverUrl.trim(),
+    model: model.trim(),
+    toolCallMode: toolMode,
+    maxContextTokens,
+    maxOutputTokens,
+    requestTimeoutMs,
+  };
+  try {
+    validateRuntimeProfile(profile, readSettings().allowedServerHosts, label);
+  } catch (error) {
+    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    return false;
+  }
+  await updateSetting("serverProfiles", { ...profiles, [profileId]: profile });
+  if (activateAfterSave) {
+    await updateSetting("activeServerProfile", profileId);
+  }
+  vscode.window.showInformationMessage(`${label} 프로필을 저장했습니다.${activateAfterSave ? " 이 프로필을 사용합니다." : ""}`);
+  return true;
+}
+
+async function pickToolCallMode(label: string, current: ToolCallMode): Promise<ToolCallMode | undefined> {
+  const options: Array<vscode.QuickPickItem & { value: ToolCallMode }> = [
+    { label: "자동 도구 선택", description: 'tools + tool_choice="auto", JSON fallback 사용', value: "auto" },
+    { label: "Native 자동 도구", description: 'tools + tool_choice="auto", native tool_calls만 사용', value: "native" },
+    { label: "필수 도구 호출", description: 'tools + tool_choice="required"', value: "required" },
+    { label: "JSON 호환", description: "native tools 없이 텍스트 JSON envelope 사용", value: "json" },
+    { label: "도구 비활성화", description: "tools를 전송하지 않음", value: "disabled" },
+  ];
+  const selected = await vscode.window.showQuickPick(options, {
+    title: `${label}: Tool Calling 방식`,
+    placeHolder: options.find((option) => option.value === current)?.label,
+    ignoreFocusOut: true,
+  });
+  return selected?.value;
+}
+
+async function promptInteger(title: string, current: number, minimum: number, maximum: number): Promise<number | undefined> {
+  const value = await vscode.window.showInputBox({
+    title,
+    value: String(current),
+    ignoreFocusOut: true,
+    validateInput: (text) => {
+      const parsed = Number(text);
+      return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum
+        ? undefined
+        : `${minimum} 이상 ${maximum} 이하의 정수를 입력하세요.`;
+    },
+  });
+  return value === undefined ? undefined : Number(value);
+}
+
+function profileSummary(profile: LlmServerProfile): string {
+  return profileIsComplete(profile)
+    ? `${profile.serverUrl} · ${profile.model} · tools: ${profile.toolCallMode}`
+    : "설정 필요";
 }
 
 export async function setAuthToken(secrets: vscode.SecretStorage): Promise<void> {

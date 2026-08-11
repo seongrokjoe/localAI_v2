@@ -35,12 +35,39 @@ npm run package:vsix
 
 ```json
 {
-  "companyCodeAI.serverUrl": "http://internal-llm-server:8000/v1",
-  "companyCodeAI.model": "internal-model",
-  "companyCodeAI.maxContextTokens": 200000,
-  "companyCodeAI.maxOutputTokens": 60000
+  "companyCodeAI.activeServerProfile": "existing",
+  "companyCodeAI.serverProfiles": {
+    "existing": {
+      "serverUrl": "http://old-internal-llm:8000/v1",
+      "model": "old-model",
+      "toolCallMode": "auto",
+      "maxContextTokens": 200000,
+      "maxOutputTokens": 60000,
+      "requestTimeoutMs": 120000
+    },
+    "new": {
+      "serverUrl": "http://new-internal-llm:8000/v1",
+      "model": "new-model",
+      "toolCallMode": "required",
+      "maxContextTokens": 200000,
+      "maxOutputTokens": 60000,
+      "requestTimeoutMs": 120000
+    }
+  }
 }
 ```
+
+채팅 상단의 서버 버튼 또는 명령 팔레트의 `Company Code AI: LLM 서버 선택`에서 `기존 서버`와 `변경 서버`를 재시작 없이 전환할 수 있습니다. 기존 단일 `serverUrl`/`model` 설정만 있으면 처음 프로필을 열 때 어느 서버 프로필로 가져올지 선택합니다.
+
+Tool Calling 방식은 서버 프로필마다 설정합니다.
+
+- `auto`: native tools와 `tool_choice="auto"`를 전송하고 텍스트 JSON fallback도 허용합니다. vLLM 서버에 `--enable-auto-tool-choice`와 모델별 `--tool-call-parser`가 필요합니다.
+- `native`: `auto`와 같은 native 요청을 보내되 native `tool_calls`만 처리합니다.
+- `required`: `tool_choice="required"`와 내부 최종 응답 도구를 사용합니다. vLLM structured outputs 기반 서버용입니다.
+- `json`: native tools를 전송하지 않고 텍스트 JSON envelope만 처리합니다.
+- `disabled`: 워크스페이스 도구를 전송하지 않습니다.
+
+인증 토큰은 두 프로필이 공통으로 사용하며 VS Code SecretStorage에 저장됩니다.
 
 서버에 bearer token이 필요하면 명령 팔레트에서 `Company Code AI: 인증 토큰 설정`을 실행합니다.
 
