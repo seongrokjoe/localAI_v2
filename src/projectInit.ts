@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { readRuntimeConfig } from "./config";
 import { truncateToTokens } from "./context";
+import { createTokenBudget } from "./tokenBudget";
 import { LlmClient } from "./llmClient";
 import { ChatMessage, CompletionResult } from "./types";
 
@@ -64,6 +65,7 @@ export class ProjectInitializer {
     await vscode.window.withProgress(progressOptions, async (progress, token) => {
       const config = await readRuntimeConfig(this.secrets);
       const client = new LlmClient(config);
+      const inputTokenLimit = createTokenBudget(config.maxContextTokens, config.maxOutputTokens).inputTokens;
       this.output.appendLine(`프로젝트 요약 초기화 시작: ${folder.uri.fsPath}`);
 
       progress.report({ message: "솔루션 및 프로젝트 파일 스캔 중" });
@@ -82,7 +84,7 @@ export class ProjectInitializer {
         const project = projects[i];
         progress.report({ message: `${project.path} 요약 중`, increment: projects.length ? 50 / projects.length : 0 });
         const context = await buildProjectContext(project);
-        const content = await summarizeProject(client, scan, project, context).catch((error) => {
+        const content = await summarizeProject(client, scan, project, context, inputTokenLimit).catch((error) => {
           const message = error instanceof Error ? error.message : String(error);
           this.output.appendLine(`${project.path} 프로젝트 요약 실패: ${message}`);
           return renderFallbackProjectSummary(project, message);
@@ -95,7 +97,7 @@ export class ProjectInitializer {
         return;
       }
       progress.report({ message: "프로젝트 요약을 SUMMARY.md로 축약 중", increment: 20 });
-      const summary = await summarizeSolution(client, scan, projectSummaries).catch((error) => {
+      const summary = await summarizeSolution(client, scan, projectSummaries, inputTokenLimit).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         this.output.appendLine(`솔루션 요약 실패: ${message}`);
         return renderFallbackSolutionSummary(scan, projectSummaries, message);
@@ -255,7 +257,10 @@ async function buildProjectContext(project: ProjectInfo): Promise<string> {
   ].join("\n\n");
 }
 
-async function summarizeProject(client: LlmClient, scan: ScanResult, project: ProjectInfo, context: string): Promise<string> {
+async function summarizeProject(client: LlmClient, scan: ScanResult, project: ProjectInfo, context: string, inputTokenLimit: number): Promise<string> {
+  const scanLimit = Math.max(512, Math.floor(inputTokenLimit * 0.15));
+  const projectLimit = Math.max(512, Math.floor(inputTokenLimit * 0.15));
+  const projectContextLimit = Math.max(1024, inputTokenLimit - scanLimit - projectLimit - 4096);
   const messages: ChatMessage[] = [
     {
       role: "system",
@@ -270,16 +275,18 @@ async function summarizeProject(client: LlmClient, scan: ScanResult, project: Pr
     {
       role: "user",
       content: [
-        `<scan>${truncateForInit(JSON.stringify({ solutions: scan.solutionFiles, importantFiles: scan.importantFiles }, null, 2), 30000)}</scan>`,
-        `<project>${truncateForInit(JSON.stringify(project, null, 2), 20000)}</project>`,
-        `<projectContext>${truncateForInit(context, 140000)}</projectContext>`,
+        `<scan>${truncateForInit(JSON.stringify({ solutions: scan.solutionFiles, importantFiles: scan.importantFiles }, null, 2), scanLimit)}</scan>`,
+        `<project>${truncateForInit(JSON.stringify(project, null, 2), projectLimit)}</project>`,
+        `<projectContext>${truncateForInit(context, projectContextLimit)}</projectContext>`,
       ].join("\n\n"),
     },
   ];
   return (await completePlain(client, messages)).content;
 }
 
-async function summarizeSolution(client: LlmClient, scan: ScanResult, projectSummaries: ProjectSummary[]): Promise<string> {
+async function summarizeSolution(client: LlmClient, scan: ScanResult, projectSummaries: ProjectSummary[], inputTokenLimit: number): Promise<string> {
+  const scanLimit = Math.max(512, Math.min(30000, Math.floor(inputTokenLimit * 0.2)));
+  const summariesLimit = Math.max(1024, inputTokenLimit - scanLimit - 4096);
   const messages: ChatMessage[] = [
     {
       role: "system",
@@ -294,8 +301,8 @@ async function summarizeSolution(client: LlmClient, scan: ScanResult, projectSum
     {
       role: "user",
       content: [
-        `<deterministicScan>${truncateForInit(JSON.stringify(scan, null, 2), 70000)}</deterministicScan>`,
-        `<projectSummaries>${truncateForInit(projectSummaries.map((item) => `## ${item.path}\n${item.content}`).join("\n\n"), 120000)}</projectSummaries>`,
+        `<deterministicScan>${truncateForInit(JSON.stringify(scan, null, 2), scanLimit)}</deterministicScan>`,
+        `<projectSummaries>${truncateForInit(projectSummaries.map((item) => `## ${item.path}\n${item.content}`).join("\n\n"), summariesLimit)}</projectSummaries>`,
         "SUMMARY.md를 다음 섹션으로 생성하세요: 솔루션 개요, 프로젝트 구성, 의존성 그래프, 진입점, 빌드 및 테스트, 중요 디렉터리, 현재 AI 작업 메모, 확인 필요.",
       ].join("\n\n"),
     },
@@ -446,8 +453,8 @@ function safeFileName(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "_");
 }
 
-function truncateForInit(text: string, maxChars: number): string {
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n[truncated]`;
+function truncateForInit(text: string, maxTokens: number): string {
+  return truncateToTokens(text, maxTokens);
 }
 
 function stripMarkdownFence(text: string): string {

@@ -11,6 +11,7 @@ import {
   ChatMessage,
   RuntimeConfig,
   SourceSnapshot,
+  ImplementationReference,
   ChatToolCall,
   ChatToolDefinition,
   PatchApplyOutcome,
@@ -18,7 +19,6 @@ import {
   PreparedAssistantPatch,
   WorkspacePatchChange,
 } from "./types";
-import { estimateTokens, truncateToTokens } from "./context";
 import { buildContextTransmissionSection, ContextTransmissionEntry, formatContextTransmissionManifest } from "./contextTransmission";
 import { LlmClient } from "./llmClient";
 import { readSummaryForContext } from "./projectInit";
@@ -28,8 +28,9 @@ import { isLineRangeChange } from "./patchText";
 import { extractReplacementContent } from "./proposalText";
 import { parseLineChangeResponse, renderNumberedFile } from "./lineChangeProtocol";
 import { validateLineMappedChanges, ValidationRunResult } from "./projectValidation";
-import { discoverProjectGraph } from "./projectGraph";
 import { extractFinalResponse, finalResponseTool, finalResponseToolName, requiredToolPrompt } from "./requiredToolProtocol";
+import { createTokenBudget, estimateTokens, truncateToTokens } from "./tokenBudget";
+import { extractDirectReferenceSpecifiers, resolveImplementationReference } from "./implementationReferences";
 
 const baseSystemPrompt = [
   "당신은 VS Code 안에서 실행되는 사내용 코드베이스 AI 도우미 Company Code AI입니다.",
@@ -173,7 +174,9 @@ export class CodeAgent {
     if (options.mode === "implement") {
       return await this.runLineMappedImplementation(prompt, contextItems, config, options, signal, onStatus);
     }
-    const contextPack = await this.buildContextPack(prompt, contextItems, config.maxContextTokens, options);
+    const tokenBudget = createTokenBudget(config.maxContextTokens, config.maxOutputTokens);
+    const planContextBudget = Math.max(1024, tokenBudget.inputTokens - 60000);
+    const contextPack = await this.buildContextPack(prompt, contextItems, planContextBudget, options);
     if (contextPack.manifest.length > 0) await onStatus?.(formatContextTransmissionManifest(contextPack.manifest));
     const messages: ChatMessage[] = [
       { role: "system", content: `${baseSystemPrompt}\n\n${modePrompts[options.mode]}` },
@@ -275,12 +278,28 @@ export class CodeAgent {
   ): Promise<AgentRunResult> {
     await onStatus?.("구현 대상 파일 확인 중");
     const uris = await this.collectImplementationUris(contextItems);
-    const snapshots = await this.expandImplementationSnapshots(await this.createSourceSnapshots(uris));
+    const snapshots = await this.createSourceSnapshots(uris);
+    const references = await this.collectImplementationReferences(snapshots);
+    const referenceContext = renderImplementationReferences(references);
     const implementationPrompt = truncateToTokens(prompt, 30000);
     const memory = truncateToTokens(renderMemory(options), 10000);
     const summary = truncateToTokens(await readSummaryForContext(10000), 10000);
     const previousValidation = this.lastAutomaticValidation ? truncateToTokens(renderValidationFailure(this.lastAutomaticValidation), 12000) : "";
-    const batches = buildImplementationBatches(snapshots, implementationPrompt, memory, summary);
+    const tokenBudget = createTokenBudget(config.maxContextTokens, config.maxOutputTokens);
+    const batches = buildImplementationBatches(
+      snapshots,
+      implementationPrompt,
+      memory,
+      summary,
+      previousValidation,
+      referenceContext,
+      tokenBudget.inputTokens,
+    );
+    await onStatus?.(
+      `[컨텍스트] 입력 예산 ${tokenBudget.inputTokens.toLocaleString("ko-KR")} 토큰, ` +
+      `출력 예약 ${tokenBudget.outputTokens.toLocaleString("ko-KR")} 토큰, ` +
+      `수정 대상 ${snapshots.length}개, 읽기 전용 참고 ${references.length}개, 요청 ${batches.length}개`,
+    );
     const client = new LlmClient(config);
     const changes: AgentRunResult["changeBlocks"] = [];
     const issues: string[] = [];
@@ -299,6 +318,7 @@ export class CodeAgent {
             summary ? `<projectSummary>\n${summary}\n</projectSummary>` : "",
             previousValidation ? `<previousValidation>\n${previousValidation}\n</previousValidation>` : "",
             `<request>\n${implementationPrompt}\n</request>`,
+            referenceContext ? `<referenceContext readonly="true">\n${referenceContext}\n</referenceContext>` : "",
             batches[index].join("\n\n"),
           ].filter(Boolean).join("\n\n"),
         },
@@ -307,9 +327,14 @@ export class CodeAgent {
       try {
         const result = await client.complete({ messages, signal, onDelta: () => undefined });
         const parsed = parseLineChangeResponse(result.content, protocolId);
-        changes.push(...parsed.changes);
+        const scoped = constrainImplementationChanges(parsed.changes, snapshots, implementationPrompt);
+        changes.push(...scoped.changes);
         issues.push(...parsed.issues.map((issue) => `요청 ${index + 1}: ${issue}`));
-        this.output.appendLine(`[라인 변경 프로토콜] 요청 ${index + 1}/${batches.length}: 변경 ${parsed.changes.length}개, 경고 ${parsed.issues.length}개`);
+        issues.push(...scoped.issues.map((issue) => `요청 ${index + 1}: ${issue}`));
+        this.output.appendLine(
+          `[라인 변경 프로토콜] 요청 ${index + 1}/${batches.length}: 변경 ${scoped.changes.length}개, ` +
+          `경고 ${parsed.issues.length + scoped.issues.length}개`,
+        );
       } catch (error) {
         if (signal?.aborted || error instanceof vscode.CancellationError) throw error;
         const issue = `요청 ${index + 1}/${batches.length} 실패: ${errorMessage(error)}`;
@@ -443,6 +468,7 @@ export class CodeAgent {
   ): Promise<AgentRunResult["changeBlocks"]> {
     const protocolId = `P${randomBytes(6).toString("hex").toUpperCase()}`;
     const client = new LlmClient(config);
+    const tokenBudget = createTokenBudget(config.maxContextTokens, config.maxOutputTokens);
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const relatedProjectContext = root ? await readRelatedProjectContext(root, validation.projects) : "";
     const messages: ChatMessage[] = [
@@ -459,8 +485,8 @@ export class CodeAgent {
         role: "user",
         content: [
           `<request>\n${prompt}\n</request>`,
-          `<sourceContext>\n${truncateToTokens(sourceContext, 90000)}\n</sourceContext>`,
-          relatedProjectContext ? `<relatedProjectContext>\n${truncateToTokens(relatedProjectContext, 30000)}\n</relatedProjectContext>` : "",
+          `<sourceContext>\n${truncateToTokens(sourceContext, Math.floor(tokenBudget.inputTokens * 0.45))}\n</sourceContext>`,
+          relatedProjectContext ? `<relatedProjectContext>\n${truncateToTokens(relatedProjectContext, Math.floor(tokenBudget.inputTokens * 0.15))}\n</relatedProjectContext>` : "",
           `<currentCandidate>\n${truncateToTokens(renderCandidateChanges(currentChanges), 10000)}\n</currentCandidate>`,
           `<validationFailure>\n${truncateToTokens(renderValidationFailure(validation), 20000)}\n</validationFailure>`,
           "Generate the corrected complete change set now.",
@@ -521,49 +547,34 @@ export class CodeAgent {
     return snapshots;
   }
 
-  private async expandImplementationSnapshots(initial: SourceSnapshot[]): Promise<SourceSnapshot[]> {
+  private async collectImplementationReferences(editable: SourceSnapshot[]): Promise<ImplementationReference[]> {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return initial;
-    const graph = await discoverProjectGraph(root, initial.map((snapshot) => snapshot.path));
-    const paths = new Set(initial.map((snapshot) => snapshot.path.replace(/\\/g, "/")));
-    for (const project of [...graph.changedProjects, ...graph.dependentProjects]) {
-      paths.add(project.path);
-      for (const source of project.sourceFiles) {
-        if (!source.includes("*") && isImplementationContextPath(source)) paths.add(source);
+    if (!root) return [];
+    const editablePaths = new Set(editable.map((snapshot) => normalizePath(snapshot.path).toLowerCase()));
+    const resolvedPaths = new Set<string>();
+    for (const snapshot of editable) {
+      for (const specifier of extractDirectReferenceSpecifiers(snapshot.path, snapshot.text)) {
+        const resolved = await resolveImplementationReference(root, snapshot.path, specifier);
+        if (resolved && !editablePaths.has(normalizePath(resolved).toLowerCase())) resolvedPaths.add(resolved);
       }
     }
-    for (const snapshot of initial) {
-      for (const include of extractLocalIncludes(snapshot.text)) {
-        const candidate = path.posix.normalize(path.posix.join(path.posix.dirname(snapshot.path), include));
-        if (!candidate.startsWith("../") && await fileExists(path.join(root, candidate))) paths.add(candidate);
-      }
-    }
-    const snapshots = [...initial];
-    let usedChars = snapshots.reduce((total, snapshot) => total + snapshot.text.length, 0);
-    for (const relativePath of paths) {
-      if (snapshots.some((snapshot) => snapshot.path === relativePath) || snapshots.length >= 120 || usedChars >= 600000) continue;
-      const uri = vscode.Uri.file(path.join(root, relativePath));
+
+    const references: ImplementationReference[] = [];
+    let usedTokens = 0;
+    for (const relativePath of resolvedPaths) {
+      const remaining = 20000 - usedTokens;
+      if (remaining <= 0) break;
       try {
-        const document = await vscode.workspace.openTextDocument(uri);
-        if (document.isDirty || !isImplementationContextPath(relativePath)) continue;
-        const text = document.getText();
-        if (text.length > 120000) continue;
-        const snapshot: SourceSnapshot = {
-          id: `F${String(snapshots.length + 1).padStart(3, "0")}`,
-          path: relativePath,
-          uri: uri.toString(),
-          snapshot: hashText(text),
-          languageId: document.languageId,
-          text,
-          lineCount: document.lineCount,
-        };
-        snapshots.push(snapshot);
-        usedChars += text.length;
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(root, relativePath)));
+        if (document.isDirty) continue;
+        const text = truncateToTokens(document.getText(), Math.min(5000, remaining));
+        references.push({ path: relativePath, languageId: document.languageId, text });
+        usedTokens += estimateTokens(text);
       } catch {
-        // A generated or unavailable project item is left for the compiler diagnostics to explain.
+        // Missing or generated references are omitted from read-only context.
       }
     }
-    return snapshots;
+    return references;
   }
 
   async prepareAssistantChangeProposal(
@@ -721,7 +732,9 @@ export class CodeAgent {
   ): Promise<{ changes?: WorkspacePatchChange[]; message: string }> {
     const exists = await this.tools.fileExists(targetPath);
     const current = exists ? await this.tools.readFileExact(targetPath) : "";
-    const fileContext = exists ? buildPatchFileContext(current, `${originalPrompt}\n${assistantResponse}`, 480000) : "[새 파일]";
+    const tokenBudget = createTokenBudget(config.maxContextTokens, config.maxOutputTokens);
+    const fileContextChars = Math.max(16000, Math.floor((tokenBudget.inputTokens - 70000) * 2));
+    const fileContext = exists ? buildPatchFileContext(current, `${originalPrompt}\n${assistantResponse}`, fileContextChars) : "[새 파일]";
     let feedback = "";
 
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -815,7 +828,7 @@ export class CodeAgent {
   ): Promise<{ content: string; manifest: ContextTransmissionEntry[] }> {
     const sections: string[] = [];
     const budget = Math.min(maxTokens, 200000);
-    const usable = Math.max(8000, budget);
+    const usable = Math.max(0, budget);
     let used = 0;
     const manifest: ContextTransmissionEntry[] = [];
 
@@ -1156,13 +1169,27 @@ function finishPlanRun(content: string): AgentRunResult {
   return { content: content.trim(), changeBlocks: [], sourceSnapshots: [], issues: [] };
 }
 
-const IMPLEMENT_INPUT_TOKEN_LIMIT = 150000;
 const IMPLEMENT_CHUNK_TOKEN_LIMIT = 120000;
 const IMPLEMENT_CHUNK_OVERLAP_LINES = 100;
 
-function buildImplementationBatches(snapshots: SourceSnapshot[], prompt: string, memory: string, summary: string): string[][] {
-  const fixedTokens = estimateTokens(prompt) + estimateTokens(memory) + estimateTokens(summary) + 5000;
-  const batchBudget = Math.max(20000, IMPLEMENT_INPUT_TOKEN_LIMIT - fixedTokens);
+function buildImplementationBatches(
+  snapshots: SourceSnapshot[],
+  prompt: string,
+  memory: string,
+  summary: string,
+  previousValidation: string,
+  referenceContext: string,
+  inputTokenLimit: number,
+): string[][] {
+  const fixedTokens = estimateTokens(prompt) + estimateTokens(memory) + estimateTokens(summary) +
+    estimateTokens(previousValidation) + estimateTokens(referenceContext) + 8000;
+  const batchBudget = inputTokenLimit - fixedTokens;
+  if (batchBudget < 4096) {
+    throw new Error(
+      `구현 요청의 고정 컨텍스트가 입력 예산을 초과합니다. 입력 예산 ${inputTokenLimit.toLocaleString("ko-KR")} 토큰, ` +
+      `고정 컨텍스트 약 ${fixedTokens.toLocaleString("ko-KR")} 토큰입니다. 계획 또는 첨부 컨텍스트를 줄이세요.`,
+    );
+  }
   const unitBudget = Math.min(IMPLEMENT_CHUNK_TOKEN_LIMIT, batchBudget);
   const units: string[] = [];
   for (const snapshot of snapshots) {
@@ -1280,22 +1307,34 @@ function formatValidationDiagnostic(diagnostic: ValidationRunResult["diagnostics
   return `[${diagnostic.severity}] ${location}: ${diagnostic.message}`;
 }
 
-function isImplementationContextPath(value: string): boolean {
-  return path.basename(value).toLowerCase() === "cmakelists.txt" || /\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ixx|m|mm|cs|fs|vb|xaml|vcxproj|csproj|sln|slnx|props|targets|json|cmake)$/i.test(value);
+function renderImplementationReferences(references: ImplementationReference[]): string {
+  return references.map((reference) =>
+    `--- READ_ONLY_REFERENCE path="${reference.path.replace(/"/g, "&quot;")}" language="${reference.languageId}" ---\n${reference.text}`,
+  ).join("\n\n");
 }
 
-function extractLocalIncludes(content: string): string[] {
-  return Array.from(content.matchAll(/^\s*#\s*include\s*["<]([^">]+)[">]/gm)).map((match) => match[1]).filter((value) => !value.includes("/../"));
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.stat(filePath);
-    return true;
-  } catch {
-    return false;
+function constrainImplementationChanges(
+  changes: AgentRunResult["changeBlocks"],
+  editable: SourceSnapshot[],
+  request: string,
+): { changes: AgentRunResult["changeBlocks"]; issues: string[] } {
+  const editableIds = new Set(editable.map((snapshot) => snapshot.id));
+  const normalizedRequest = normalizePath(request).toLowerCase();
+  const accepted: AgentRunResult["changeBlocks"] = [];
+  const issues: string[] = [];
+  for (const change of changes) {
+    if (change.operation === "create_file") {
+      const newPath = normalizePath(change.path ?? "");
+      if (newPath && normalizedRequest.includes(newPath.toLowerCase())) accepted.push(change);
+      else issues.push(`요청에 경로가 명시되지 않은 새 파일 생성을 제외했습니다: ${change.path ?? "(경로 없음)"}`);
+      continue;
+    }
+    if (editableIds.has(change.fileId)) accepted.push(change);
+    else issues.push(`선택하지 않은 파일의 변경을 제외했습니다: ${change.fileId}`);
   }
+  return { changes: accepted, issues };
 }
+
 
 async function readRelatedProjectContext(root: string, projects: ValidationRunResult["projects"]): Promise<string> {
   const paths = new Set<string>();

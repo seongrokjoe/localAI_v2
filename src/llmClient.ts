@@ -1,5 +1,6 @@
 import { RuntimeConfig, ChatMessage, ChatToolCall, ChatToolDefinition, CompletionResult, NativeToolChoice } from "./types";
 import { validateServerUrl } from "./security";
+import { assertChatRequestFits, createTokenBudget } from "./tokenBudget";
 
 interface CompletionOptions {
   messages: ChatMessage[];
@@ -13,6 +14,8 @@ export class LlmClient {
   constructor(private readonly config: RuntimeConfig) {}
 
   async complete(options: CompletionOptions): Promise<CompletionResult> {
+    const budget = createTokenBudget(this.config.maxContextTokens, this.config.maxOutputTokens);
+    assertChatRequestFits(options.messages, options.tools, budget);
     const url = buildChatCompletionsUrl(this.config.serverUrl, this.config.allowedServerHosts);
     const body = buildChatCompletionBody(this.config, options);
 
@@ -30,6 +33,13 @@ export class LlmClient {
 
       if (!response.ok) {
         const errorText = await response.text();
+        if (response.status === 400 && /maximum context length|context length|too many tokens/i.test(errorText)) {
+          throw new Error(
+            this.config.activeServerLabel + ": 서버가 컨텍스트 길이를 거부했습니다. " +
+            "프로필의 maxContextTokens가 실제 모델 한도와 일치하는지 확인하세요. " +
+            truncate(errorText, 1000),
+          );
+        }
         throw new Error(`LLM 요청 실패 (${response.status}): ${truncate(errorText, 1000)}`);
       }
 

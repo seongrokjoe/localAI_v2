@@ -1,3 +1,5 @@
+import { estimateTokens, sliceTextToTokens } from "./tokenBudget";
+
 export interface ContextTransmissionInput {
   label: string;
   content: string;
@@ -78,12 +80,11 @@ export function formatContextTransmissionManifest(entries: ContextTransmissionEn
 }
 
 function sliceCompleteLines(content: string, maxTokens: number): { text: string; endLine: number; truncated: boolean; partialEndColumn?: number } {
-  const maxChars = Math.max(0, maxTokens * 4);
-  if (content.length <= maxChars) {
+  if (estimateTokens(content) <= maxTokens) {
     const text = content.replace(/(?:\r\n|\r|\n)+$/, "");
     return { text, endLine: lineCount(text), truncated: false };
   }
-  const prefix = content.slice(0, maxChars);
+  const prefix = sliceTextToTokens(content, maxTokens);
   const newline = Math.max(prefix.lastIndexOf("\n"), prefix.lastIndexOf("\r"));
   if (newline < 0) return { text: prefix, endLine: 1, truncated: true, partialEndColumn: prefix.length };
   const text = prefix.slice(0, newline).replace(/\r$/, "");
@@ -101,8 +102,4 @@ function lineCount(content: string): number {
 
 function escapeAttribute(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-}
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
 }

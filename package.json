@@ -211,7 +211,8 @@
                 "maxContextTokens": {
                   "type": "number",
                   "minimum": 8000,
-                  "maximum": 200000
+                  "maximum": 200000,
+                  "markdownDescription": "모델의 전체 컨텍스트 길이입니다. 입력과 최대 출력 토큰의 합이 이 값을 넘지 않도록 Extension이 입력을 분할합니다."
                 },
                 "maxOutputTokens": {
                   "type": "number",
@@ -259,7 +260,7 @@
           "default": 200000,
           "minimum": 8000,
           "maximum": 200000,
-          "markdownDescription": "서버로 보낼 입력 컨텍스트 토큰 목표 상한입니다. 확장은 200k 입력 하드캡을 적용합니다.",
+          "markdownDescription": "모델의 전체 컨텍스트 길이입니다. 입력과 최대 출력 토큰의 합이 이 값을 넘지 않도록 Extension이 입력을 분할합니다.",
           "deprecationMessage": "서버 프로필을 구성한 뒤 프로필별 maxContextTokens를 사용하세요. 이 값은 이전 설정 호환용입니다."
         },
         "companyCodeAI.maxOutputTokens": {
@@ -355,7 +356,7 @@
     "test:webview": "node scripts/test-webview.mjs",
     "test:workbench": "npm run compile && node scripts/test-change-blocks.mjs && node scripts/test-change-workbench-webview.mjs",
     "test:validation": "npm run compile && node scripts/test-project-validation.mjs",
-    "test": "npm run compile && node scripts/test-llm-config.mjs && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-context-transmission.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
+    "test": "npm run compile && node scripts/test-token-budget.mjs && node scripts/test-implementation-references.mjs && node scripts/test-llm-config.mjs && node scripts/test-text-encoding.mjs && node scripts/test-patch-protocol.mjs && node scripts/test-proposal-text.mjs && node scripts/test-change-blocks.mjs && node scripts/test-context-transmission.mjs && node scripts/test-project-validation.mjs && node scripts/test-webview.mjs && node scripts/test-change-workbench-webview.mjs",
     "watch": "tsc -watch -p ./",
     "check:endpoints": "node scripts/check-no-external-endpoints.mjs",
     "prepare:release": "node scripts/ensure-release-dir.mjs",

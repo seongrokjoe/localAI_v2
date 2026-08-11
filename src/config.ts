@@ -7,6 +7,7 @@ import {
   ServerProfileId,
 } from "./types";
 import { validateServerUrl } from "./security";
+import { createTokenBudget } from "./tokenBudget";
 import {
   legacyProfile,
   normalizeServerProfiles,
@@ -75,6 +76,12 @@ export function validateRuntimeProfile(profile: LlmServerProfile, allowedHosts: 
   }
   if (!profile.model.trim()) {
     throw new Error(`${label}: 모델이 설정되지 않았습니다.`);
+  }
+  try {
+    createTokenBudget(profile.maxContextTokens, profile.maxOutputTokens);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}: ${message}`);
   }
 }
 

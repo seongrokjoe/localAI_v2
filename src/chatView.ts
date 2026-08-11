@@ -37,6 +37,7 @@ interface SendOptions {
   displayText?: string;
   statusText?: string;
   phaseText?: string;
+  includeConversationMemory?: boolean;
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -205,6 +206,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         displayText: "선택한 계획 구현을 시작합니다.",
         phaseText: "계획 구현 중",
         statusText: "계획 구현 중",
+        includeConversationMemory: false,
       },
     );
   }
@@ -266,6 +268,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.abortController = new AbortController();
     try {
       const config = await readRuntimeConfig(this.secrets);
+      const memory = this.sessionStore.memoryContext(options.includeConversationMemory !== false);
       await this.sessionStore.recordTurn("user", prompt);
       const result = await this.agent.run(
         prompt,
@@ -273,7 +276,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         config,
         {
           mode: this.modeManager.current,
-          memory: this.sessionStore.memoryContext(),
+          memory,
         },
         () => undefined,
         this.abortController.signal,
@@ -679,7 +682,7 @@ async function editServerProfile(
 
   const toolMode = await pickToolCallMode(label, current.toolCallMode);
   if (!toolMode) return false;
-  const maxContextTokens = await promptInteger(`${label}: 최대 입력 컨텍스트 토큰`, current.maxContextTokens, 8000, 200000);
+  const maxContextTokens = await promptInteger(`${label}: 모델 전체 컨텍스트 토큰`, current.maxContextTokens, 8000, 200000);
   if (maxContextTokens === undefined) return false;
   const maxOutputTokens = await promptInteger(`${label}: 최대 출력 토큰`, current.maxOutputTokens, 1024, 60000);
   if (maxOutputTokens === undefined) return false;

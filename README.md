@@ -61,6 +61,11 @@ npm run package:vsix
 
 Tool Calling 방식은 서버 프로필마다 설정합니다.
 
+`maxContextTokens`는 모델의 입력과 출력을 합한 전체 컨텍스트 길이입니다. Extension은 여기서
+`maxOutputTokens`와 안전 여유를 제외한 범위만 입력에 사용하며, 큰 구현 대상은 여러 요청으로
+자동 분할합니다. ImplementMode에서는 명시적으로 선택한 파일만 수정 대상으로 사용하고 직접
+참조한 로컬 include/import 파일은 제한된 읽기 전용 참고자료로만 전송합니다.
+
 - `auto`: native tools와 `tool_choice="auto"`를 전송하고 텍스트 JSON fallback도 허용합니다. vLLM 서버에 `--enable-auto-tool-choice`와 모델별 `--tool-call-parser`가 필요합니다.
 - `native`: `auto`와 같은 native 요청을 보내되 native `tool_calls`만 처리합니다.
 - `required`: `tool_choice="required"`와 내부 최종 응답 도구를 사용합니다. vLLM structured outputs 기반 서버용입니다.

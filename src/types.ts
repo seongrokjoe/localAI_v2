@@ -160,6 +160,12 @@ export interface AgentRunResult {
   validation?: ValidationRunResult;
 }
 
+export interface ImplementationReference {
+  path: string;
+  languageId: string;
+  text: string;
+}
+
 export type WorkbenchMappingStatus = "mapped" | "needs-file" | "needs-range" | "stale";
 
 export interface ChangeWorkbenchBlockState extends LineMappedChange {

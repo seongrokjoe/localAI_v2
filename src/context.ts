@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import * as vscode from "vscode";
 import { ContextItem } from "./types";
+export { estimateTokens, truncateToTokens } from "./tokenBudget";
 
 export class ContextManager {
   private readonly items = new Map<string, ContextItem>();
@@ -75,16 +76,4 @@ export class ContextManager {
 
 function contextPath(uri: vscode.Uri): string {
   return vscode.workspace.asRelativePath(uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
-}
-
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-export function truncateToTokens(text: string, maxTokens: number): string {
-  const maxChars = Math.max(0, maxTokens * 4);
-  if (text.length <= maxChars) {
-    return text;
-  }
-  return `${text.slice(0, maxChars)}\n[truncated]`;
 }

@@ -48,12 +48,12 @@ export class SessionStore {
     await this.save();
   }
 
-  memoryContext(): AgentMemoryContext {
+  memoryContext(includeConversation = true): AgentMemoryContext {
     return {
       activeScope: this.state.activeScope,
       projectMemory: this.state.projectMemory,
-      sessionSummary: this.state.sessionSummary,
-      recentTurns: this.state.turns.slice(-6),
+      sessionSummary: includeConversation ? this.state.sessionSummary : "",
+      recentTurns: includeConversation ? this.state.turns.slice(-6) : [],
     };
   }
 

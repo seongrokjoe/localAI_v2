@@ -26,7 +26,7 @@ assert.equal(budgeted.entries[1].omitted, true);
 assert.match(formatContextTransmissionManifest(budgeted.entries), /omitted\.cpp: 전달 안 됨/);
 
 const oneLine = buildContextTransmissionSection([{ label: "file: generated.cpp", content: "x".repeat(1000), source: "explicit", maxTokens: 20 }], 200);
-assert.equal(oneLine.entries[0].partialEndColumn, 80);
-assert.match(formatContextTransmissionManifest(oneLine.entries), /1줄 중 열 1~80/);
+assert.equal(oneLine.entries[0].partialEndColumn, 40);
+assert.match(formatContextTransmissionManifest(oneLine.entries), /1줄 중 열 1~40/);
 
 console.log("Context transmission manifest tests passed.");
